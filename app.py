@@ -24,19 +24,15 @@ logging.basicConfig(level=logging.ERROR)
 ###############################################################################
 load_dotenv()
 APP_ID = os.getenv('GITHUB_APP_ID')
-PRIVATE_KEY_PATH = os.getenv('GITHUB_PRIVATE_KEY_PATH')
+PRIVATE_KEY = os.getenv('GITHUB_PRIVATE_KEY')
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
 if not APP_ID:
     logging.error("GITHUB_APP_ID not set.")
     sys.exit(1)
 
-if not PRIVATE_KEY_PATH or not os.path.isfile(PRIVATE_KEY_PATH):
-    logging.error("GITHUB_PRIVATE_KEY_PATH is not set or file does not exist.")
-    sys.exit(1)
-
-with open(PRIVATE_KEY_PATH, 'r') as f:
-    PRIVATE_KEY = f.read()
+if not PRIVATE_KEY:
+    logging.error("GITHUB_ORIVET_KEY not set")
 
 try:
     APP_ID = int(APP_ID)
