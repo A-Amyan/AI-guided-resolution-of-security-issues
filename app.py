@@ -93,6 +93,10 @@ def webhook():
 
     return jsonify({'status': 'ignored'}), 200
 
+@app.route('/ping')
+def ping():
+    return 'pong', 200
+
 ###############################################################################
 # PUSH Logic
 # (No new Issue creation for misuses; only create PR if needed, no merges)
