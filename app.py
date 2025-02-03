@@ -268,7 +268,9 @@ def generate_pr_description_with_ai(
 
     # 6) Return the final PR description
     #    Include the GPT summary, then a final mention of the file in triple backticks:
+    admin_username = repo.owner.login
     return (
+        f"@{admin_username}\n\n"
         f"{gpt_text}\n\n"
         f"**Branch**: `{branch_name}`\n"
         f"**Pusher**: `{pusher_name}`\n\n"
@@ -322,10 +324,11 @@ def handle_pull_request(payload):
     post_pr_comment(Github(token_str), repo_full_name, pr_number, summary_comment)
     return jsonify({'status': 'success'}), 200
 
-def analyze_pr_no_issue(repo_full_name, pr_number, token_str, pr_user_login):
+def analyze_pr_no_issue(repo_full_name, pr_number, token_str):
     github = Github(token_str)
     repo = github.get_repo(repo_full_name)
     pr = repo.get_pull(pr_number)
+    admin_username = repo.owner.login
 
     java_files = []
     for pr_file in pr.get_files():
@@ -343,6 +346,7 @@ def analyze_pr_no_issue(repo_full_name, pr_number, token_str, pr_user_login):
     # *** Changes to the user prompt to add a short summary if no misuses found ***
     system_prompt = (
         "You are a Java security analyst. The user wants to detect any of these 16 misuses:\n"
+        "If you find any of the following issues, return them in a JSON array. Do not include any additional text or context:\n"
         "1) Hardcoded cryptographic keys in SecretKeySpec\n"
         "2) Hardcoded password in PBEKeySpec\n"
         "3) Hardcoded KeyStore password\n"
@@ -370,7 +374,7 @@ def analyze_pr_no_issue(repo_full_name, pr_number, token_str, pr_user_login):
     )
     user_prompt = (
         f"Analyze the following Java code:\n\n{combined_code}\n\n"
-        "Return a JSON array of objects if you find any misuses. If none, return an empty array plus a short explanation."
+        "If you find any misuses, Return only a JSON array. No additional text or explanations are needed. If none, return an empty array plus a short explanation."
     )
 
     if not openai.api_key:
@@ -391,11 +395,13 @@ def analyze_pr_no_issue(repo_full_name, pr_number, token_str, pr_user_login):
         logging.error(f"OpenAI call failed: {e}")
         return "Failed to analyze code with AI."
 
-
     misuses = parse_ai_output(ai_text)
     if not misuses:
         # The AI text might contain a short summary after an empty array. We'll show it.
-        return f"**AI Output**:\n```json\n{ai_text}\n```"
+        return (
+            f"@{admin_username} **Potential Security Misuses**\n\n"
+            f"**AI Output**:\n```json\n{ai_text}\n```"
+        )
 
     # Build a summary
     summary_lines = []
@@ -409,17 +415,20 @@ def analyze_pr_no_issue(repo_full_name, pr_number, token_str, pr_user_login):
         )
 
     return (
-        "**Potential Security Misuses Found** (No Issues created)\n\n"
+        f"@{admin_username} **Potential Security Misuses**\n\n"
         + "\n\n".join(summary_lines)
         + f"\n\n**AI Output**:\n```json\n{ai_text}\n```"
     )
 
-def analyze_code_no_issue(java_code):
+def analyze_code_no_issue(java_code, token_str, repo_full_name):
     """
     Same system and user prompts as `analyze_pr_no_issue`,
     but for a single snippet of code. 
     Returns a textual analysis with potential misuses or 'No issues' + summary.
     """
+    github = Github(token_str)
+    repo = github.get_repo(repo_full_name)
+
     if not openai.api_key:
         return "No OpenAI API key configured; skipping AI analysis."
 
@@ -469,9 +478,14 @@ def analyze_code_no_issue(java_code):
         logging.error(f"OpenAI call failed: {e}")
         return "Failed to analyze code with AI."
 
+    admin_username = repo.owner.login
+
     misuses = parse_ai_output(ai_text)
     if not misuses:
-        return f"```json\n{ai_text}\n```"
+        return (
+            f"@{admin_username} **Potential Security Misuses**\n\n"
+            f"```json\n{ai_text}\n```"
+        )
 
     summary_lines = []
     for misuse in misuses:
