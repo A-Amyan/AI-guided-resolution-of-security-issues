@@ -126,7 +126,7 @@ The server will listen on port 5000 (or the port specified in your `.env` file).
 
 ## Deployment
 
-For production deployment, consider using platforms such as [Heroku](https://heroku.com), [AWS Elastic Beanstalk](https://aws.amazon.com/elasticbeanstalk/), or [Google Cloud Run](https://cloud.google.com/run). Ensure your webhook endpoint is publicly accessible and configure environment variables on your hosting platform.
+GitHub AI Bot is already deployed on [Render](https://render.com/). Its publicly accessible URL (for webhook events) is provided during installation. 
 
 ## Webhook Endpoints
 
