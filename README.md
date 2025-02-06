@@ -38,7 +38,7 @@ This repository contains a GitHub App written in Python using Flask. The bot lis
 
 2. **Create and Activate a Virtual Environment (optional but recommended):**
 
-   - On Linux/MacOS, run:
+  - On Linux/MacOS, run:
     ```bash
     source venv/bin/activate
     ```
