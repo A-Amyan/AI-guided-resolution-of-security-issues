@@ -57,7 +57,7 @@ This repository contains a GitHub App written in Python using Flask. The bot lis
    PyGithub==1.59.0
    openai==0.27.8
    requests==2.31.0
-   gunicorn==20.1.0
+   gunicorn==20.1.0 # needed for deploying
    ```
 
    Then install with:
