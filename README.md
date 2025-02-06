@@ -29,7 +29,7 @@ Follow these steps to install the GitHub AI Bot on your repositories:
 
     Navigate to the installation page for the GitHub App:
   
-    [https://github.com/apps/GitHub_AI_Bot](https://github.com/apps/GitHub_AI_Bot)
+    [https://github.com/apps/GitHub_AI_Bot](https://github.com/A-Amyan/GitHub_AI_Bot)
 
   - Step 2: Install the App
 
