@@ -116,6 +116,10 @@ After installation, the GitHub AI Bot will begin processing webhook events from 
 ## Running the Bot Locally
 
 Start the Flask application by running:
+```python
+if __name__ == '__main__':
+    app.run(debug=True, port=5000)
+```
 
 ```bash
 python app.py
