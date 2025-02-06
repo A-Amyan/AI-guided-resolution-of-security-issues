@@ -35,10 +35,10 @@ Follow these steps to install the GitHub AI Bot on your repositories:
 
     On the installation page, click the **Install** (or **Configure**) button. You will be prompted to choose whether to install the app on:
 
-    - All repositories:**  
+    - All repositories:  
       The app will have access to every repository in your account or organization.
   
-    - Selected repositories:**  
+    - Selected repositories:  
       You can select the specific repositories you want the app to have access to.
 
   - Step 3: Grant Permissions
