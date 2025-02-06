@@ -15,9 +15,9 @@ import openai
 from github import GithubIntegration, Github, Auth
 
 ###############################################################################
-# Minimal logging: only errors
+# Logging: set to DEBUG for troubleshooting
 ###############################################################################
-logging.basicConfig(level=logging.ERROR)
+logging.basicConfig(level=logging.DEBUG)
 
 ###############################################################################
 # Load environment variables
@@ -30,10 +30,9 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 if not APP_ID:
     logging.error("GITHUB_APP_ID not set.")
     sys.exit(1)
-
 if not PRIVATE_KEY:
-    logging.error("GITHUB_ORIVET_KEY not set")
-
+    logging.error("GITHUB_PRIVATE_KEY not set.")
+    sys.exit(1)
 try:
     APP_ID = int(APP_ID)
 except ValueError:
@@ -41,7 +40,7 @@ except ValueError:
     sys.exit(1)
 
 ###############################################################################
-# GitHub App Auth + OpenAI init
+# GitHub App Auth & OpenAI initialization
 ###############################################################################
 auth = Auth.AppAuth(app_id=APP_ID, private_key=PRIVATE_KEY)
 git_integration = GithubIntegration(auth=auth)
@@ -50,14 +49,14 @@ if not openai.api_key:
     logging.error("No OPENAI_API_KEY found. AI calls may fail.")
 
 ###############################################################################
-# In-memory conversation store
+# In-memory conversation store (keyed by (repo_full_name, issue_number))
 ###############################################################################
 conversation_store = {}
 
 def get_or_create_conversation(repo_full_name, issue_number, issue_body=None):
     """
     Retrieve or create a conversation for ChatCompletion.
-    Optionally inject the issue body as a message if it's the first time we see this issue.
+    Optionally inject the issue body if first seen.
     """
     key = (repo_full_name, issue_number)
     if key not in conversation_store:
@@ -75,6 +74,46 @@ def get_or_create_conversation(repo_full_name, issue_number, issue_body=None):
     return conversation_store[key]
 
 ###############################################################################
+# Helper: extract a file name from a text string.
+###############################################################################
+def extract_file_name(text):
+    # First, try to find a file name inside triple backticks with "java"
+    pattern = r"```java\s+([\w\d_/\\.-]+\.java)\s*```"
+    match = re.search(pattern, text)
+    if match:
+        return match.group(1)
+    # Otherwise, try to extract any substring ending in ".java"
+    pattern2 = r"([\w\d_/\\.-]+\.java)"
+    match = re.search(pattern2, text)
+    if match:
+        return match.group(1)
+    return None
+
+###############################################################################
+# Helper: Post a comment on a PR (pull request comment)
+###############################################################################
+def post_pr_comment(github_instance, repo_full_name, pr_number, comment_body):
+    try:
+        repo = github_instance.get_repo(repo_full_name)
+        pr = repo.get_pull(pr_number)
+        pr.create_issue_comment(comment_body)
+        logging.debug(f"Posted comment to PR #{pr_number} in {repo_full_name}.")
+    except Exception as e:
+        logging.error(f"Failed to post PR comment: {e}")
+
+###############################################################################
+# Helper: Post a comment on an Issue (non-PR)
+###############################################################################
+def post_issue_comment(github_instance, repo_full_name, issue_number, comment_body):
+    try:
+        repo = github_instance.get_repo(repo_full_name)
+        issue = repo.get_issue(issue_number)
+        issue.create_comment(comment_body)
+        logging.debug(f"Posted comment to Issue #{issue_number} in {repo_full_name}.")
+    except Exception as e:
+        logging.error(f"Failed to post Issue comment: {e}")
+
+###############################################################################
 # Flask App
 ###############################################################################
 app = Flask(__name__)
@@ -83,14 +122,13 @@ app = Flask(__name__)
 def webhook():
     event = request.headers.get('X-GitHub-Event')
     payload = request.json
-
+    logging.debug(f"Received event: {event}")
     if event == 'push':
         return handle_push(payload)
     elif event == 'pull_request':
         return handle_pull_request(payload)
     elif event == 'issue_comment':
         return handle_issue_comment(payload)
-
     return jsonify({'status': 'ignored'}), 200
 
 @app.route('/ping')
@@ -98,8 +136,7 @@ def ping():
     return 'pong', 200
 
 ###############################################################################
-# PUSH Logic
-# (No new Issue creation for misuses; only create PR if needed, no merges)
+# PUSH Logic: Create PR on branch pushes
 ###############################################################################
 def handle_push(payload):
     repository = payload.get('repository')
@@ -107,129 +144,64 @@ def handle_push(payload):
     if not (repository and installation):
         logging.error("Missing 'repository' or 'installation' in push payload.")
         return jsonify({'status': 'missing fields'}), 400
-
     installation_id = installation.get('id')
     if not installation_id:
         return jsonify({'status': 'missing installation'}), 400
-
     access_token = git_integration.get_access_token(installation_id=installation_id)
     token_str = access_token.token
     github = Github(token_str)
-
     full_name = repository.get('full_name', '')
     ref = payload.get('ref', '')
     pusher_name = payload.get('pusher', {}).get('name', 'user')
-
-    # Only handle branch pushes
     if not ref.startswith("refs/heads/"):
         return jsonify({'status': 'ignored - not a branch push'}), 200
-
     branch_name = ref.replace("refs/heads/", "", 1)
     repo = github.get_repo(full_name)
-
     try:
         default_branch = repo.default_branch
-    except:
+    except Exception:
         logging.error("Could not identify default branch.")
         default_branch = "main"
-
-    # Skip if pushing to the default branch
     if branch_name == default_branch:
         return jsonify({'status': 'ignored - push on default branch'}), 200
-    
     commits = payload.get('commits', [])
     java_files = set()
     for commit in commits:
-        # Check "added" files
-        for f in commit.get('added', []):
+        for f in commit.get('added', []) + commit.get('modified', []):
             if f.endswith('.java'):
                 java_files.add(f)
-        # Check "modified" files
-        for f in commit.get('modified', []):
-            if f.endswith('.java'):
-                java_files.add(f)
-
-    # Pick one Java file to highlight, or use a fallback
-    if java_files:
-        java_file_name = list(java_files)[0]  # or use some logic to pick a specific file
-    else:
-        java_file_name = "No Java file changed."
-
-    # Possibly we have a commit SHA from the payload, e.g.
+    java_file_name = list(java_files)[0] if java_files else "No Java file changed."
     commit_sha = payload.get('after')
-
-    # Suppose we found or guessed a Java file in your commits as `java_file_name`
-    # Then call the new function:
     short_desc = generate_pr_description_with_ai(
         branch_name=branch_name,
         pusher_name=pusher_name,
         java_file_name=java_file_name,
         repo_full_name=full_name,
         token_str=token_str,
-        commit_ref=commit_sha  # or just branch_name
+        commit_ref=commit_sha
     )
-
     pr = create_pull_request_for_push(repo, branch_name, default_branch, short_desc)
     if not pr:
         return jsonify({'status': 'failed to create PR'}), 500
-
     return jsonify({'status': 'success', 'pr_url': pr.html_url}), 200
 
-def generate_pr_description_with_ai(
-    branch_name: str,
-    pusher_name: str,
-    java_file_name: str,
-    repo_full_name: str,
-    token_str: str,
-    commit_ref: str = None
-):
-    """
-    Generate a short PR description using GPT:
-      - Mentions the branch name, pusher name, and the file name in triple backticks.
-      - Fetches the actual file content from GitHub and provides a short GPT summary of it.
-    :param branch_name: Name of the branch that was pushed
-    :param pusher_name: Name of the user who pushed
-    :param java_file_name: Path to the .java file that was changed
-    :param repo_full_name: e.g. "myorg/myrepo"
-    :param token_str: GitHub token for fetching file content
-    :param commit_ref: (Optional) the specific commit SHA or branch ref to fetch from
-    :return: A string containing the PR description
-    """
-
-    # 1) If there's no OpenAI key, fallback
+def generate_pr_description_with_ai(branch_name, pusher_name, java_file_name, repo_full_name, token_str, commit_ref=None):
     if not openai.api_key:
-        return (
-            f"Automated PR from '{branch_name}' by {pusher_name}.\n\n"
-            f"Impacted file (no AI summary):\n```java\n{java_file_name}\n```"
-        )
-
-    # 2) Try fetching the file content from GitHub
+        return (f"Automated PR from '{branch_name}' by {pusher_name}.\n\n"
+                f"Impacted file (no AI summary):\n```java\n{java_file_name}\n```")
     github = Github(token_str)
     repo = github.get_repo(repo_full_name)
-    
-    # By default, we’ll fetch from the pushed commit SHA (if provided)
-    # or from the branch name itself.
     ref_to_fetch = commit_ref if commit_ref else branch_name
-
     try:
         file_obj = repo.get_contents(java_file_name, ref=ref_to_fetch)
         file_content = base64.b64decode(file_obj.content).decode("utf-8")
     except Exception as e:
-        # If we fail to fetch the file, still return a minimal description
-        return (
-            f"Automated PR from '{branch_name}' by {pusher_name}.\n\n"
-            f"Could not fetch the file `{java_file_name}` for AI summary.\n"
-            f"Error: {e}"
-        )
-
-    # 3) Build a short snippet of the file to keep GPT prompt concise
-    # (If your file is large, you may want to limit to first N lines or N characters.)
+        return (f"Automated PR from '{branch_name}' by {pusher_name}.\n\n"
+                f"Could not fetch the file `{java_file_name}` for AI summary.\nError: {e}")
     MAX_CHARS = 1000
     snippet = file_content[:MAX_CHARS]
     if len(file_content) > MAX_CHARS:
         snippet += "\n... [Truncated for prompt brevity] ..."
-
-    # 4) Construct the GPT prompt
     system_prompt = (
         "You are an assistant who writes short PR descriptions.\n"
         "You have been given the name of a branch, the pusher's name, and a Java file's content.\n"
@@ -246,8 +218,6 @@ def generate_pr_description_with_ai(
         "Please write a short summary for a PR that merges this branch to the main branch. "
         "Mention the file in triple backticks at the end."
     )
-
-    # 5) Call GPT to generate a short description
     try:
         resp = openai.ChatCompletion.create(
             model="gpt-4",
@@ -260,24 +230,16 @@ def generate_pr_description_with_ai(
         )
         gpt_text = resp.choices[0].message.content.strip()
     except Exception as e:
-        return (
-            f"Automated PR from '{branch_name}' by {pusher_name}.\n\n"
-            f"Could not get AI-based summary. Error: {e}\n\n"
-            f"File:\n```java\n{java_file_name}\n```"
-        )
-
-    # 6) Return the final PR description
-    #    Include the GPT summary, then a final mention of the file in triple backticks:
+        return (f"Automated PR from '{branch_name}' by {pusher_name}.\n\n"
+                f"Could not get AI-based summary. Error: {e}\n\n"
+                f"File:\n```java\n{java_file_name}\n```")
     admin_username = repo.owner.login
-    return (
-        f"@{admin_username}\n\n"
-        f"{gpt_text}\n\n"
-        f"**Branch**: `{branch_name}`\n"
-        f"**Pusher**: `{pusher_name}`\n\n"
-        "**Impacted file**:\n"
-        f"```java\n{java_file_name}\n```"
-    )
-
+    return (f"@{admin_username}\n\n"
+            f"{gpt_text}\n\n"
+            f"**Branch**: `{branch_name}`\n"
+            f"**Pusher**: `{pusher_name}`\n"
+            "**Impacted file**:\n"
+            f"```java\n{java_file_name}\n```")
 
 def create_pull_request_for_push(repo, source_branch, target_branch, pr_body):
     pr_title = f"Auto PR from branch '{source_branch}'"
@@ -293,34 +255,25 @@ def create_pull_request_for_push(repo, source_branch, target_branch, pr_body):
         return None
 
 ###############################################################################
-# Pull Request Logic
-# (No new Issues on misuses in PR. We just post a summary comment.)
+# Pull Request Logic: Post comment on PR events.
 ###############################################################################
 def handle_pull_request(payload):
     action = payload.get('action')
     pr_data = payload.get('pull_request')
     repo_info = payload.get('repository')
     installation = payload.get('installation')
-
     if not (pr_data and repo_info and installation):
         return jsonify({'status': 'missing fields'}), 400
-
     if action not in ['opened', 'synchronize', 'edited', 'ready_for_review']:
         return jsonify({'status': f'ignored {action}'}), 200
-
     installation_id = installation.get('id')
     if not installation_id:
         return jsonify({'status': 'missing installation'}), 400
-
     access_token = git_integration.get_access_token(installation_id=installation_id)
     token_str = access_token.token
-
     repo_full_name = repo_info.get('full_name', '')
     pr_number = pr_data.get('number', 0)
-    pr_user_login = pr_data.get('user', {}).get('login', 'user')
-
-    # Analyze PR .java changes, but do NOT open an issue for each misuse
-    summary_comment = analyze_pr_no_issue(repo_full_name, pr_number, token_str, pr_user_login)
+    summary_comment = analyze_pr_no_issue(repo_full_name, pr_number, token_str)
     post_pr_comment(Github(token_str), repo_full_name, pr_number, summary_comment)
     return jsonify({'status': 'success'}), 200
 
@@ -329,7 +282,6 @@ def analyze_pr_no_issue(repo_full_name, pr_number, token_str):
     repo = github.get_repo(repo_full_name)
     pr = repo.get_pull(pr_number)
     admin_username = repo.owner.login
-
     java_files = []
     for pr_file in pr.get_files():
         if pr_file.filename.endswith('.java') and pr_file.status in ['added', 'modified']:
@@ -337,13 +289,9 @@ def analyze_pr_no_issue(repo_full_name, pr_number, token_str):
             if content:
                 snippet = f"--- {pr_file.filename} ---\n{content}"
                 java_files.append(snippet)
-
     if not java_files:
         return "No Java code found in this pull request."
-
     combined_code = "\n\n".join(java_files)
-
-    # *** Changes to the user prompt to add a short summary if no misuses found ***
     system_prompt = (
         "You are a Java security analyst. The user wants to detect any of these 16 misuses:\n"
         "If you find any of the following issues, return them in a JSON array. Do not include any additional text or context:\n"
@@ -363,23 +311,14 @@ def analyze_pr_no_issue(repo_full_name, pr_number, token_str):
         "14) Using broken symmetric ciphers (DES, Blowfish, RC4, etc.) instead of AES\n"
         "15) Using RSA key size < 2048 bits\n"
         "16) Using broken hash function (e.g. SHA1, MD5) instead of stronger ones (e.g. SHA-256)\n"
-        "If you find any, return them in a JSON array with:\n"
-        " - name\n"
-        " - location\n"
-        " - description\n"
-        " - severity\n"
-        " - correction\n\n"
-        "If you find none, return an empty array **and** a short textual summary "
-        "of why there are no misuses or any best practices."
+        "Return a JSON array with keys: name, location, description, severity, correction. If none, return an empty array plus a summary."
     )
     user_prompt = (
         f"Analyze the following Java code:\n\n{combined_code}\n\n"
-        "If you find any misuses, Return only a JSON array. No additional text or explanations are needed. If none, return an empty array plus a short explanation."
+        "Return only a JSON array. If no issues are found, return an empty array plus a short explanation."
     )
-
     if not openai.api_key:
         return "No OpenAI API key configured; skipping AI analysis."
-
     try:
         resp = openai.ChatCompletion.create(
             model="gpt-4",
@@ -394,44 +333,24 @@ def analyze_pr_no_issue(repo_full_name, pr_number, token_str):
     except Exception as e:
         logging.error(f"OpenAI call failed: {e}")
         return "Failed to analyze code with AI."
-
     misuses = parse_ai_output(ai_text)
     if not misuses:
-        # The AI text might contain a short summary after an empty array. We'll show it.
-        return (
-            f"@{admin_username} **Potential Security Misuses**\n\n"
-            f"**AI Output**:\n```json\n{ai_text}\n```"
-        )
-
-    # Build a summary
+        return f"@{admin_username} **Potential Security Misuses**\n\n**AI Output**:\n```json\n{ai_text}\n```"
     summary_lines = []
     for misuse in misuses:
         summary_lines.append(
-            f"- **{misuse.get('name')}**\n"
-            f"  Location: {misuse.get('location')}\n"
-            f"  Severity: {misuse.get('severity')}\n"
-            f"  Description: {misuse.get('description')}\n"
-            f"  Correction:\n```java\n{misuse.get('correction')}\n```"
+            f"- **{misuse.get('name')}**\n  Location: {misuse.get('location')}\n  Severity: {misuse.get('severity')}\n  Description: {misuse.get('description')}\n  Correction:\n```java\n{misuse.get('correction')}\n```"
         )
-
-    return (
-        f"@{admin_username} **Potential Security Misuses**\n\n"
-        + "\n\n".join(summary_lines)
-        + f"\n\n**AI Output**:\n```json\n{ai_text}\n```"
-    )
+    return f"@{admin_username} **Potential Security Misuses**\n\n" + "\n\n".join(summary_lines) + f"\n\n**AI Output**:\n```json\n{ai_text}\n```"
 
 def analyze_code_no_issue(java_code, token_str, repo_full_name):
     """
-    Same system and user prompts as `analyze_pr_no_issue`,
-    but for a single snippet of code. 
-    Returns a textual analysis with potential misuses or 'No issues' + summary.
+    Analyze a single snippet of Java code for potential security misuses.
     """
     github = Github(token_str)
     repo = github.get_repo(repo_full_name)
-
     if not openai.api_key:
         return "No OpenAI API key configured; skipping AI analysis."
-
     system_prompt = (
         "You are a Java security analyst. The user wants to detect any of these 16 misuses:\n"
         "1) Hardcoded cryptographic keys in SecretKeySpec\n"
@@ -450,19 +369,12 @@ def analyze_code_no_issue(java_code, token_str, repo_full_name):
         "14) Using broken symmetric ciphers (DES, Blowfish, RC4, etc.) instead of AES\n"
         "15) Using RSA key size < 2048 bits\n"
         "16) Using broken hash function (SHA1, MD5) instead of stronger ones (e.g. SHA-256)\n"
-        "If you find any, return them in a JSON array with:\n"
-        " - name\n"
-        " - location\n"
-        " - description\n"
-        " - severity\n"
-        " - correction\n\n"
-        "If you find none, return an empty array **and** a short textual summary."
+        "Return a JSON array with keys: name, location, description, severity, correction. If none, return an empty array plus a summary."
     )
     user_prompt = (
         f"Analyze this Java code:\n\n{java_code}\n\n"
-        "Return a JSON array of objects if you find any misuses. If none, return an empty array plus a short explanation."
+        "Return only a JSON array of objects if you find any misuses. If none, return an empty array plus a short explanation."
     )
-
     try:
         resp = openai.ChatCompletion.create(
             model="gpt-4",
@@ -477,36 +389,22 @@ def analyze_code_no_issue(java_code, token_str, repo_full_name):
     except Exception as e:
         logging.error(f"OpenAI call failed: {e}")
         return "Failed to analyze code with AI."
-
     admin_username = repo.owner.login
-
     misuses = parse_ai_output(ai_text)
     if not misuses:
-        return (
-            f"@{admin_username} **Potential Security Misuses**\n\n"
-            f"```json\n{ai_text}\n```"
-        )
-
+        return f"@{admin_username} **Potential Security Misuses**\n\n```json\n{ai_text}\n```"
     summary_lines = []
     for misuse in misuses:
         summary_lines.append(
-            f"- **{misuse.get('name')}**\n"
-            f"  Location: {misuse.get('location')}\n"
-            f"  Severity: {misuse.get('severity')}\n"
-            f"  Description: {misuse.get('description')}\n"
-            f"  Correction:\n```java\n{misuse.get('correction')}\n```"
+            f"- **{misuse.get('name')}**\n  Location: {misuse.get('location')}\n  Severity: {misuse.get('severity')}\n  Description: {misuse.get('description')}\n  Correction:\n```java\n{misuse.get('correction')}\n```"
         )
-
-    return (
-        "**Potential Security Misuses Found** (No Issues created)\n\n"
-        + "\n\n".join(summary_lines)
-        + f"\n\n**AI Output**:\n```json\n{ai_text}\n```"
-    )
+    return ("**Potential Security Misuses Found** (No Issues created)\n\n" +
+            "\n\n".join(summary_lines) +
+            f"\n\n**AI Output**:\n```json\n{ai_text}\n```")
 
 def analyze_repo_and_open_issues(github, repo_full_name, token_str):
     repo = github.get_repo(repo_full_name)
     default_branch = repo.default_branch
-
     java_files = []
     contents = repo.get_contents("", ref=default_branch)
     queue = contents[:]
@@ -516,29 +414,22 @@ def analyze_repo_and_open_issues(github, repo_full_name, token_str):
             queue.extend(repo.get_contents(item.path, ref=default_branch))
         elif item.type == 'file' and item.path.endswith('.java'):
             java_files.append(item.path)
-
     created_count = 0
     for file_path in java_files:
         raw_code = fetch_file_content(repo, file_path, default_branch, token_str)
         if not raw_code:
             continue
-
         print(f"=== DEBUG: read file '{file_path}' (length {len(raw_code)} chars) ===\n")
         print(raw_code)
         print("=== END OF FILE ===\n")
-
-        analysis = analyze_code_no_issue(raw_code)
+        analysis = analyze_code_no_issue(raw_code, token_str, repo_full_name)
         title = f"Security Analysis for {file_path}"
-        body = (
-            f"**File:** `{file_path}`\n\n"
-            f"**Analysis:**\n\n{analysis}\n"
-        )
+        body = f"**File:** `{file_path}`\n\n**Analysis:**\n\n{analysis}\n"
         try:
             repo.create_issue(title=title, body=body)
             created_count += 1
-        except:
+        except Exception:
             pass
-
     return f"Analyzed {len(java_files)} .java files. Created {created_count} Issues."
 
 def fetch_file_content(repo, filename, ref, token_str):
@@ -552,7 +443,7 @@ def fetch_file_content(repo, filename, ref, token_str):
             return base64.b64decode(data["content"]).decode("utf-8")
         else:
             return None
-    except:
+    except Exception:
         return None
 
 def parse_ai_output(ai_text):
@@ -568,7 +459,7 @@ def parse_ai_output(ai_text):
             if all(k in item for k in required_keys):
                 valid.append(item)
         return valid
-    except:
+    except Exception:
         return []
 
 def post_pr_comment(github, repo_full_name, pr_number, comment_body):
@@ -576,118 +467,226 @@ def post_pr_comment(github, repo_full_name, pr_number, comment_body):
         repo = github.get_repo(repo_full_name)
         pr = repo.get_pull(pr_number)
         pr.create_issue_comment(comment_body)
-    except:
+    except Exception:
         pass
 
+###############################################################################
+# New Function: Post a comment on an Issue (non-PR)
+###############################################################################
+def post_issue_comment(github, repo_full_name, issue_number, comment_body):
+    try:
+        repo = github.get_repo(repo_full_name)
+        issue = repo.get_issue(issue_number)
+        issue.create_comment(comment_body)
+    except Exception:
+        pass
+
+###############################################################################
+# New Function: Merge code based on admin correction (for Issue comments)
+###############################################################################
+def attempt_merge_corrected_code_issue(repo_full_name, issue_number, token_str, comment_body, issue_body):
+    """
+    For an issue comment command:
+      1. Extract the correction instructions from the admin's comment (plain text, not a code snippet).
+      2. Get the file name from the issue body (or PR description if needed).
+      3. Retrieve the original file content from the repository.
+      4. Use AI (via analyze_code_no_issue) to analyze the file.
+      5. Then use AI to apply the correction instructions to the original code.
+      6. Update the repository with the new corrected code.
+      7. Return a short message confirming that the code was updated.
+         (Do not post the new code in the comment.)
+    """
+    # Step 1: Extract correction instructions by removing the command text.
+    correction_instructions = comment_body.replace("@AIBot merge code", "").strip()
+    if not correction_instructions:
+        return ("No correction instructions found in your comment. "
+                "Please include the correction details after '@AIBot merge code'.")
+    # Step 2: Get file name from the issue body; if not found and it's a PR, try the PR description.
+    file_name = extract_file_name(issue_body)
+    if not file_name:
+        # Optionally, one could check the conversation here as well.
+        return ("No file name found in the issue body. "
+                "Please include the file name in triple backticks (e.g., ```java\nMyClass.java\n```).")
+    github_instance = Github(token_str)
+    repo_instance = github_instance.get_repo(repo_full_name)
+    default_branch = repo_instance.default_branch
+    try:
+        file_obj = repo_instance.get_contents(file_name, ref=default_branch)
+        original_code = base64.b64decode(file_obj.content).decode("utf-8")
+    except Exception as e:
+        return f"Failed to fetch file '{file_name}' from branch '{default_branch}'. Error: {e}"
+    # (Step 3 was getting the file content above.)
+    # Step 4: Analyze the original code.
+    analysis_result = analyze_code_no_issue(original_code, token_str, repo_full_name)
+    # (You might log or include the analysis result if needed.)
+    # Step 5: Create a prompt for AI to apply the correction instructions.
+    system_prompt = (
+        "You are a code merging assistant. The admin has provided correction instructions. "
+        "Apply these corrections to the original Java code while making only minimal changes."
+    )
+    user_prompt = (
+        f"Original Code:\n```java\n{original_code}\n```\n\n"
+        f"Correction Instructions:\n{correction_instructions}\n\n"
+        "Please output the updated Java code as plain text."
+    )
+    try:
+        resp = openai.ChatCompletion.create(
+            model="gpt-4",
+            temperature=0,
+            max_tokens=3000,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ]
+        )
+        new_code = resp.choices[0].message.content.strip()
+    except Exception as e:
+        return f"OpenAI call failed: {e}"
+    # Step 6: Update the repository file with the new code.
+    commit_message = f"[AIBot] Merge correction in {file_name} from Issue #{issue_number}"
+    try:
+        repo_instance.update_file(
+            path=file_name,
+            message=commit_message,
+            content=new_code,
+            sha=file_obj.sha,
+            branch=default_branch
+        )
+    except Exception as e:
+        return f"Failed to commit updated code: {e}"
+    # Step 7: Return a short confirmation message.
+    return f"Code in `{file_name}` updated successfully on branch `{default_branch}`."
+
+###############################################################################
+# Issue Comment Handler
+###############################################################################
 def handle_issue_comment(payload):
     action = payload.get('action')
     comment_data = payload.get('comment')
     issue_data = payload.get('issue')
     repo_info = payload.get('repository')
     installation = payload.get('installation')
-
     if not (comment_data and issue_data and repo_info and installation):
         return jsonify({'status': 'missing fields'}), 400
-
     if action not in ['created', 'edited']:
         return jsonify({'status': f'ignored {action}'}), 200
-
     installation_id = installation.get('id')
     if not installation_id:
         return jsonify({'status': 'missing installation'}), 400
-
     access_token = git_integration.get_access_token(installation_id=installation_id)
     token_str = access_token.token
     github = Github(token_str)
-
     repo_full_name = repo_info.get('full_name', '')
     issue_number = issue_data.get('number', 0)
     issue_body = issue_data.get('body', '')
-
     comment_body = comment_data.get('body', '')
     user_login = comment_data.get('user', {}).get('login', 'user')
-
-    # Ignore any bot's own comments
     if user_login.endswith('[bot]'):
         return jsonify({'status': 'bot comment ignored'}), 200
-
-    # Retrieve or create the conversation thread
+    admin_username = repo_info.get('owner', {}).get('login')
+    if not admin_username:
+        admin_username = "unknown-admin"
+    admin_commands = [
+        "@AIBot analyze repo",
+        "@AIBot update code",
+        "@AIBot update",
+        "@AIBot merge code",
+        "@AIBot analyze code",
+    ]
+    if any(cmd in comment_body for cmd in admin_commands) and (user_login != admin_username):
+        response = f"Sorry, only the repository owner (@{admin_username}) can use that command."
+        if 'pull_request' in issue_data:
+            post_pr_comment(github, repo_full_name, issue_number, response)
+        else:
+            post_issue_comment(github, repo_full_name, issue_number, response)
+        return jsonify({'status': 'forbidden'}), 403
     conversation = get_or_create_conversation(repo_full_name, issue_number, issue_body=issue_body)
     conversation.append({"role": "user", "content": comment_body})
-
-    # 1) @AIBot analyze repo: analyze all the exicting Java files in the repo
+    # --- Admin-only commands ---
     if "@AIBot analyze repo" in comment_body:
         result_msg = analyze_repo_and_open_issues(github, repo_full_name, token_str)
         conversation.append({"role": "assistant", "content": result_msg})
-        post_issue_comment(github, repo_full_name, issue_number, result_msg)
+        if 'pull_request' in issue_data:
+            post_pr_comment(github, repo_full_name, issue_number, result_msg)
+        else:
+            post_issue_comment(github, repo_full_name, issue_number, result_msg)
         return jsonify({'status': 'success'}), 200
-
-    # 2) @AIBot update code: Get the correction from the PR (description & comments) to update the PR code
     if "@AIBot update code" in comment_body:
         update_msg = attempt_update_pr_code(repo_full_name, issue_number, token_str, conversation)
         conversation.append({"role": "assistant", "content": update_msg})
-        post_issue_comment(github, repo_full_name, issue_number, update_msg)
+        if 'pull_request' in issue_data:
+            post_pr_comment(github, repo_full_name, issue_number, update_msg)
+        else:
+            post_issue_comment(github, repo_full_name, issue_number, update_msg)
         return jsonify({'status': 'success'}), 200
-
-
-    # 3) @AIBot update: Print the last version of the relevant file
     if "@AIBot update" in comment_body:
         fetched_code_msg = attempt_fetch_current_code(repo_full_name, issue_number, token_str)
         conversation.append({"role": "assistant", "content": fetched_code_msg})
-        post_issue_comment(github, repo_full_name, issue_number, fetched_code_msg)
-        return jsonify({'status': 'success'}), 200
-
-    # 4) @AIBot merge code merger the laste written code between tripletick
-    if "@AIBot merge code" in comment_body:
-        merged_msg = attempt_merge_corrected_code(repo_full_name, issue_number, token_str)
-        conversation.append({"role": "assistant", "content": merged_msg})
-        post_issue_comment(github, repo_full_name, issue_number, merged_msg)
-        return jsonify({'status': 'success'}), 200
-
-    # 5) @AIBot analyze code: analyze the relevant file
-    if "@AIBot analyze code" in comment_body:
-        # Look for the most recent code snippet in the conversation
-        code_snippet = find_last_code_snippet(conversation)
-        if code_snippet:
-            analyze_result = analyze_code_no_issue(code_snippet)
+        if 'pull_request' in issue_data:
+            post_pr_comment(github, repo_full_name, issue_number, fetched_code_msg)
         else:
-            analyze_result = (
-                "No code snippet found in this conversation. "
-                "Please provide your Java code in triple-backticks, for example:\n\n"
-                "```java\npublic class Example {\n    // ...\n}\n```\n\n"
-                "Then mention `@AIBot analyze code` again."
-            )
-
+            post_issue_comment(github, repo_full_name, issue_number, fetched_code_msg)
+        return jsonify({'status': 'success'}), 200
+    if "@AIBot merge code" in comment_body:
+        # Use the new behavior if it's an issue comment; otherwise use the existing behavior.
+        if 'pull_request' in issue_data:
+            merged_msg = attempt_merge_corrected_code(repo_full_name, issue_number, token_str)
+        else:
+            merged_msg = attempt_merge_corrected_code_issue(repo_full_name, issue_number, token_str, comment_body, issue_body)
+        conversation.append({"role": "assistant", "content": merged_msg})
+        if 'pull_request' in issue_data:
+            post_pr_comment(github, repo_full_name, issue_number, merged_msg)
+        else:
+            post_issue_comment(github, repo_full_name, issue_number, merged_msg)
+        return jsonify({'status': 'success'}), 200
+    if "@AIBot analyze code" in comment_body:
+        # New admin order for "@AIBot analyze code":
+        # 1. Get the file name from the issue body or from the PR description.
+        file_name = extract_file_name(issue_body)
+        if not file_name and 'pull_request' in issue_data:
+            # if this is a PR comment, try to get it from the PR description (if available)
+            pr_description = issue_data.get('pull_request', {}).get('body', '')
+            file_name = extract_file_name(pr_description)
+        if not file_name:
+            # As a fallback, check conversation history.
+            combined_conv = "\n".join([msg['content'] for msg in conversation])
+            file_name = extract_file_name(combined_conv)
+        # 2. If a file name was found, retrieve its content.
+        if file_name:
+            github_instance = Github(token_str)
+            repo_instance = github_instance.get_repo(repo_full_name)
+            default_branch = repo_instance.default_branch
+            try:
+                file_obj = repo_instance.get_contents(file_name, ref=default_branch)
+                file_code = base64.b64decode(file_obj.content).decode("utf-8")
+            except Exception as e:
+                analyze_result = f"Failed to fetch file '{file_name}' from branch '{default_branch}'. Error: {e}"
+                logging.error(analyze_result)
+            else:
+                # 3. Use the existing analyze_code_no_issue function to analyze the file.
+                analyze_result = analyze_code_no_issue(file_code, token_str, repo_full_name)
+        else:
+            analyze_result = ("No file name found in the issue body or PR description. "
+                              "Please provide the file name in triple backticks (e.g., ```java\nMyClass.java\n```).")
+        # 4. Post the analysis result.
         conversation.append({"role": "assistant", "content": analyze_result})
-        post_issue_comment(github, repo_full_name, issue_number, analyze_result)
+        if 'pull_request' in issue_data:
+            post_pr_comment(github, repo_full_name, issue_number, analyze_result)
+        else:
+            post_issue_comment(github, repo_full_name, issue_number, analyze_result)
         return jsonify({'status': 'success'}), 200
-
-    # 6) @AIBot close issue
-    if "@AIBot close issue" in comment_body:
-        msg = attempt_close_issue(github, repo_full_name, issue_number)
-        conversation.append({"role": "assistant", "content": msg})
-        post_issue_comment(github, repo_full_name, issue_number, msg)
-        return jsonify({'status': 'success'}), 200
-
-    # Otherwise, let the assistant respond in a general chat style
+    # Otherwise, use general chat response.
     ai_reply = chat_with_history(conversation)
     conversation.append({"role": "assistant", "content": ai_reply})
-    post_issue_comment(github, repo_full_name, issue_number, ai_reply)
+    if 'pull_request' in issue_data:
+        post_pr_comment(github, repo_full_name, issue_number, ai_reply)
+    else:
+        post_issue_comment(github, repo_full_name, issue_number, ai_reply)
     return jsonify({'status': 'success'}), 200
-
-
-def post_issue_comment(github, repo_full_name, issue_number, reply_text):
-    try:
-        repo = github.get_repo(repo_full_name)
-        issue_obj = repo.get_issue(issue_number)
-        issue_obj.create_comment(reply_text)
-    except:
-        pass
 
 def chat_with_history(messages):
     if not openai.api_key:
         return "No AI is configured."
-
     ephemeral_instruction = {
         "role": "system",
         "content": (
@@ -698,7 +697,6 @@ def chat_with_history(messages):
             "Then type `@AIBot merge code`."
         )
     }
-
     ephemeral_messages = [ephemeral_instruction] + messages
     try:
         resp = openai.ChatCompletion.create(
@@ -707,37 +705,17 @@ def chat_with_history(messages):
             temperature=0
         )
         return resp.choices[0].message.content.strip()
-    except:
+    except Exception:
         return "Failed to respond with AI."
 
 def attempt_update_pr_code(repo_full_name, pr_number, token_str, conversation):
-    """
-    1) Fetch the Pull Request object and get the PR branch name (pr.head.ref).
-    2) Find the relevant .java file(s) from the PR or from user instructions.
-    3) Collect context from the PR body and conversation.
-    4) Send everything to GPT asking for an updated version of the file with minimal changes.
-    5) Commit the updated file to the PR branch.
-    """
-
     github = Github(token_str)
     repo = github.get_repo(repo_full_name)
-
     try:
         pr = repo.get_pull(pr_number)
     except Exception as e:
         return f"Could not get PR #{pr_number}: {e}"
-
-    pr_branch = pr.head.ref  # e.g. "feature/some-branch"
-
-    # -------------------------------------------------------------------------
-    # 1) Identify which file(s) to update.
-    #
-    #   For simplicity, we assume only ONE relevant Java file is being changed
-    #   or we simply pick the first .java file. If you want to handle multiple
-    #   files, you could gather them all or ask the user to specify exactly
-    #   which file to update in triple backticks, similarly to your existing
-    #   find_file_name_in_conversation().
-    # -------------------------------------------------------------------------
+    pr_branch = pr.head.ref
     file_to_update = None
     for f in pr.get_files():
         if f.filename.endswith('.java'):
@@ -745,69 +723,33 @@ def attempt_update_pr_code(repo_full_name, pr_number, token_str, conversation):
             break
     if not file_to_update:
         return "No .java files found in this PR to update."
-
-    # We can also see if the user explicitly provided a file in conversation:
-    # user_file_name = find_file_name_in_conversation(conversation)
-    # if user_file_name:
-    #     file_to_update = user_file_name
-
-    # -------------------------------------------------------------------------
-    # 2) Fetch the current content of that file from the PR branch
-    # -------------------------------------------------------------------------
     try:
         contents = repo.get_contents(file_to_update, ref=pr_branch)
     except Exception as e:
-        return (
-            f"Failed to fetch '{file_to_update}' from branch '{pr_branch}'. "
-            f"Make sure that file exists in the PR. Error: {e}"
-        )
-
+        return f"Failed to fetch '{file_to_update}' from branch '{pr_branch}'. Error: {e}"
     original_code = base64.b64decode(contents.content).decode("utf-8")
-
-    # -------------------------------------------------------------------------
-    # 3) Build an AI prompt that includes:
-    #    - The user instructions (from the conversation & PR body)
-    #    - The original file content
-    #    - A request to only do minimal changes
-    # -------------------------------------------------------------------------
-    # Join up the conversation messages from the user or the PR description
-    # that might contain instructions. You can decide how much or how little
-    # context to feed GPT. As an example, we’ll do a short approach:
-    # -------------------------------------------------------------------------
     instructions = ""
-    # Collect some relevant conversation messages
     for msg in conversation:
         if msg['role'] == 'user':
             instructions += f"User said:\n{msg['content']}\n\n"
-
-    # Also append the PR body if needed
     if pr.body:
         instructions += f"PR Description:\n{pr.body}\n\n"
-
     system_prompt = (
         "You are a Java code refactoring assistant. The user has provided instructions "
         "for how to fix or update this Java file. You have the original code below.\n\n"
         "Apply only the minimal changes needed to address the user's instructions.\n\n"
-        "Return the entire updated file content. Do NOT wrap in JSON or mention line numbers; "
-        "simply return the new file as plain text."
+        "Return the entire updated file content as plain text."
     )
-
     user_prompt = (
         f"User instructions / discussion:\n\n{instructions}\n"
         "Original file content:\n"
         "```java\n"
         f"{original_code}\n"
         "```\n\n"
-        "Please return the updated file with minimal changes. "
-        "Only change lines necessary to implement the user's requests."
+        "Please return the updated file with minimal changes."
     )
-
-    # -------------------------------------------------------------------------
-    # 4) Call GPT to get the updated code
-    # -------------------------------------------------------------------------
     if not openai.api_key:
         return "No OpenAI API key is configured; skipping AI-based code update."
-
     try:
         resp = openai.ChatCompletion.create(
             model="gpt-4",
@@ -816,15 +758,11 @@ def attempt_update_pr_code(repo_full_name, pr_number, token_str, conversation):
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
-            ],
+            ]
         )
         updated_code = resp.choices[0].message.content.strip()
     except Exception as e:
         return f"OpenAI call failed: {e}"
-
-    # -------------------------------------------------------------------------
-    # 5) Commit changes to the PR branch
-    # -------------------------------------------------------------------------
     commit_message = f"[AIBot] Update code in {file_to_update} from PR #{pr_number}"
     try:
         repo.update_file(
@@ -836,56 +774,37 @@ def attempt_update_pr_code(repo_full_name, pr_number, token_str, conversation):
         )
     except Exception as e:
         return f"Failed to commit updated code: {e}"
-
-    # -------------------------------------------------------------------------
-    # 6) Return a success message
-    # -------------------------------------------------------------------------
-    return (
-        f"Successfully updated the following file in the PR branch `{pr_branch}`:\n\n"
-        f"```java\n{file_to_update}\n```\n\n"
-        "Below is the updated code:\n\n"
-        f"```java\n{updated_code}\n```"
-    )
+    return f"Successfully updated the file `{file_to_update}` on branch `{pr_branch}`.\n\n```java\n{updated_code}\n```"
 
 def attempt_merge_corrected_code(repo_full_name, issue_number, token_str):
+    """
+    Existing behavior for merging code (used when the command is posted in a PR comment).
+    """
     messages = conversation_store.get((repo_full_name, issue_number), [])
     if not messages:
         return "No conversation found; cannot merge code."
-
     file_name = find_file_name_in_conversation(messages)
     if not file_name:
-        return (
-            "I couldn't find a file reference in triple backticks or text. "
-            "If `MyClass.java` was just an example, please provide the correct file name, e.g.:\n\n"
-            "```java\nActualFile.java\n```\n\n"
-            "Then the code snippet in triple-backticks as well. "
-            "After that, type `@AIBot merge code`."
-        )
-
+        return ("I couldn't find a file reference in triple backticks or text. "
+                "Please provide the correct file name in triple backticks (e.g., ```java\nActualFile.java\n```), "
+                "then the code snippet, and type `@AIBot merge code`.")
     code_snippet = find_last_code_snippet(messages)
     if not code_snippet:
-        return (
-            "I couldn't detect a code snippet to merge. "
-            "Please provide it in triple-backtick format, e.g. ```java\n...\n``` then '@AIBot merge code'."
-        )
-
+        return ("I couldn't detect a code snippet to merge. "
+                "Please provide it in triple-backtick format and then type `@AIBot merge code`.")
     github = Github(token_str)
     repo = github.get_repo(repo_full_name)
     default_branch = repo.default_branch
-
     try:
         file_contents = repo.get_contents(file_name, ref=default_branch)
     except Exception as e:
-        error_msg = f"The file '{file_name}' doesn't exist in default branch '{default_branch}'. Error: {e}"
-        return error_msg
-
-    new_content = code_snippet
+        return f"Failed to fetch '{file_name}' on branch '{default_branch}'. Error: {e}"
     commit_msg = f"Update {file_name} from Issue #{issue_number}"
     try:
         repo.update_file(
             path=file_name,
             message=commit_msg,
-            content=new_content,
+            content=code_snippet,
             sha=file_contents.sha,
             branch=default_branch
         )
@@ -893,46 +812,10 @@ def attempt_merge_corrected_code(repo_full_name, issue_number, token_str):
     except Exception as e:
         return f"Failed to merge code snippet into `{file_name}`: {e}"
 
-def attempt_close_issue(github, repo_full_name, issue_number):
-    try:
-        repo = github.get_repo(repo_full_name)
-        issue_obj = repo.get_issue(issue_number)
-        if issue_obj.state.lower() == 'closed':
-            return "Issue is already closed."
-        issue_obj.edit(state='closed')
-        return f"Issue #{issue_number} has been closed."
-    except Exception as e:
-        return f"Failed to close the issue: {e}"
-
-def find_file_name_in_conversation(messages):
-    pattern_triple_tick = r"```java\s+([\w\d_/\\.-]+\.java)\s*```"
-    for msg in messages:
-        if msg['role'] in ['assistant', 'system', 'user']:
-            match = re.search(pattern_triple_tick, msg['content'])
-            if match:
-                return match.group(1)
-    pattern_file_line = r"([\w\d_/\\.-]+\.java)"
-    for msg in messages:
-        if msg['role'] in ['assistant', 'system', 'user']:
-            match = re.search(pattern_file_line, msg['content'])
-            if match:
-                return match.group(1)
-    return None
-
-def find_last_code_snippet(messages):
-    pattern = r"```(?:java)?\s*(.*?)```"
-    for msg in reversed(messages):
-        if msg['role'] in ('user', 'assistant'):
-            blocks = re.findall(pattern, msg['content'], flags=re.DOTALL)
-            if blocks:
-                return blocks[-1].strip()
-    return None
-
 def attempt_fetch_current_code(repo_full_name, issue_number, token_str):
     messages = conversation_store.get((repo_full_name, issue_number), [])
     if not messages:
         return "No conversation found; cannot fetch code."
-
     file_name = None
     pattern_triple_tick = r"```java\s+([\w\d_/\\.-]+\.java)\s*```"
     for msg in messages:
@@ -941,7 +824,6 @@ def attempt_fetch_current_code(repo_full_name, issue_number, token_str):
             if match:
                 file_name = match.group(1)
                 break
-
     if not file_name:
         pattern_file_line = r"([\w\d_/\\.-]+\.java)"
         for msg in messages:
@@ -950,26 +832,41 @@ def attempt_fetch_current_code(repo_full_name, issue_number, token_str):
                 if match:
                     file_name = match.group(1)
                     break
-
     if not file_name:
-        return (
-            "Could not detect the Java file name in the conversation. "
-            "If `MyClass.java` was just an example, please provide the actual file name in triple-backticks or text. "
-            "Then use `@AIBot update` again."
-        )
-
+        return ("Could not detect the Java file name in the conversation. "
+                "Please provide the actual file name in triple backticks (e.g., ```java\nMyClass.java\n```), "
+                "then use `@AIBot update` again.")
     github = Github(token_str)
     repo = github.get_repo(repo_full_name)
     default_branch = repo.default_branch
-
     try:
         file_contents = repo.get_contents(file_name, ref=default_branch)
     except Exception as e:
         return f"Failed to fetch '{file_name}' on branch '{default_branch}'. Error: {e}"
-
     current_code = base64.b64decode(file_contents.content).decode("utf-8")
     return f"Here is the current code in `{file_name}`:\n\n```java\n{current_code}\n```"
 
+def find_file_name_in_conversation(messages):
+    pattern = r"```java\s+([\w\d_/\\.-]+\.java)\s*```"
+    for msg in messages:
+        if msg['role'] in ['assistant', 'system', 'user']:
+            match = re.search(pattern, msg['content'])
+            if match:
+                return match.group(1)
+    return None
+
+def find_last_code_snippet(messages):
+    pattern = r"```(?:java)?\s*(.*?)```"
+    for msg in reversed(messages):
+        if msg['role'] in ['assistant', 'user']:
+            blocks = re.findall(pattern, msg['content'], flags=re.DOTALL)
+            if blocks:
+                return blocks[-1].strip()
+    return None
+
+###############################################################################
+# Flask App Entry Point
+###############################################################################
 if __name__ == '__main__':
     port = int(os.getenv('PORT', 5000))
     app.run(host='0.0.0.0', port=port)
