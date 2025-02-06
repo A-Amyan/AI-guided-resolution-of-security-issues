@@ -125,7 +125,7 @@ python app.py
 
 ```
 
-The server will listen on port 5000 (or the port specified in your `.env` file).
+The server will listen on port 5000.
 
 ## Deployment
 
