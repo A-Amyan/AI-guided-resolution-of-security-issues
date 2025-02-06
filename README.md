@@ -108,7 +108,6 @@ After installation, the GitHub AI Bot will begin processing webhook events from 
    GITHUB_APP_ID=your_github_app_id
    GITHUB_PRIVATE_KEY="your_github_private_key_contents"
    OPENAI_API_KEY=your_openai_api_key
-   PORT=5000
    ```
 
    Replace the placeholders with your actual values.
