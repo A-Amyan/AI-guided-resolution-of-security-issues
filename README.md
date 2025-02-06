@@ -84,7 +84,8 @@ This repository contains a GitHub App written in Python using Flask. The bot lis
 Start the Flask application by running:
 
 ```bash
-gunicorn app:app --bind 0.0.0.0:$PORT
+python app.py
+
 ```
 
 The server will listen on port 5000 (or the port specified in your `.env` file).
