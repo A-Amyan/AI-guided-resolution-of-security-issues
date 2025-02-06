@@ -32,7 +32,7 @@ This repository contains a GitHub App written in Python using Flask. The bot lis
 1. **Clone the Repository:**
 
    ```bash
-   git clone https://github.com/yourusername/your-repo-name.git
+   git clone https://github.com/A-Amyan/AI-guided-resolution-of-security-issues.git
    cd your-repo-name
    ```
 
