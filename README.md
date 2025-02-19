@@ -4,53 +4,72 @@ This repository contains a GitHub App written in Python using Flask. The bot lis
 
 ## Features
 
-- **Automated Pull Requests:**  
-  When new branches are pushed that include Java file changes, the bot automatically creates a pull request with an AI-generated summary.
-
-- **Pull Request Analysis:**  
-  The bot analyzes Java code changes in pull requests for security issues (e.g., hardcoded keys, weak encryption practices) and posts the results as comments.
-
-- **Issue Comment Commands:**  
-  Admin-only commands can be issued in issue or pull request comments. Commands include:
-  - `@AIBot analyze repo`: Analyze the entire repository for common security misuses.
-  - `@AIBot update code`: Update code in a pull request based on admin instructions.
-  - `@AIBot update`: Retrieve and post the current code of a file.
-  - `@AIBot merge code`:  
-    - For PR comments, merge provided code snippets.
-    - For Issue comments, the bot extracts the Java file name from the issue body, retrieves its content, runs analysis (using `analyze_code_no_issue`), and then posts the analysis result.
-  - `@AIBot analyze code`:  
-    Extracts the Java file name from the issue body (or PR description if applicable), retrieves the file content from the repository, analyzes it using GPT-4, and posts the analysis result.
+- **GitHub App Integration & Authentication:**
+  - Uses environment variables (`GITHUB_APP_ID`, `GITHUB_PRIVATE_KEY`, `OPENAI_API_KEY`) for secure configuration.
+  - Authenticates as a GitHub App using PyGithub and a custom `Auth.AppAuth`.
+- **Flask-Based Webhook Server:**
+  - Listen for GitHub webhook events on `/webhook` and a health check endpoint `/ping`.
+  - Support the following GitHub events:
+    - **Push Events:** Automatically triggers actions on branch pushes.
+    - **Pull Request Events:** Analyzes code changes in PRs.
+    - **Issue Comment Events:** Responds to chat commands and admin instructions.
+- **Push Event Handling:**
+  - **Automatic Pull Request Creation:** When a push occurs on a non-default branch, the bot automatically creates a pull request.
+  - **Multi-File AI-Generated PR Description:**
+    - Collect all changed Java files from the push.
+    - Generate a short, security-focused PR description that summarizes all impacted Java files using OpenAI GPT‑4.
+- **Pull Request Event Handling:**
+  - **Per-File Security Analysis:**
+    - Iterate through each changed Java file in the pull request.
+    - Retrieve file contents and splits code into logical sections (using structural splitting by class or method definitions).
+    - Analyze each section for potential vulnerabilities, misuse of Java Cryptography Architecture (JCA) APIs, and security weaknesses.
+  - **Aggregated Reporting:**
+     - Generate a JSON-formatted report for each file.
+     - Post individual comments on the pull request with the security analysis for each impacted Java file.
+- **Issue Comment Command Handling:**
+  - **In-Memory Conversation Context:**
+     - Maintains conversation history per repository and issue number to ensure coherent discussions.
+  - **Admin Commands (Restricted to Repository Owner):**
+    - `@AIBot analyze repo`: Automatically scans the entire repository for Java files, analyzes each for security vulnerabilities, and opens issues with the findings.
+    - `@AIBot analyze file`: Analyzes a specific file (extracted from the issue or PR body) for security vulnerabilities.
+    - `@AIBot update code` / `@AIBot update`: Uses AI to generate updated code based on user instructions.
+    - `@AIBot merge code`: Merges AI-proposed corrections into the repository.
+  - **Strict Security-Only Discussion:**
+     - The bot’s system instructions enforce that all conversations remain focused on security analysis and vulnerability remediation.
+     - If topics fall outside Java security, the bot responds by indicating that only security-related discussion is supported.
+- **AI-Powered Analysis & Summarization:**
+  - **GPT‑4 Integration:**
+    - Generate concise PR descriptions based on Java file snippets.
+    - Perform in-depth security analysis on code sections, identifying vulnerabilities, and misuses, and suggesting secure alternatives.
+    - Merge findings from different sections to avoid duplication
+  - **Custom Prompts:**
+    - System and user prompts are tailored to focus on security best practices, cryptography, and vulnerability remediation.
+- **Code Merging & Updates:**
+  - Support updating code based on admin correction instructions.
+  - Fetche the original code from GitHub, apply minimal changes via GPT‑4 and update the repository file with a new commit.
+- **Robust Error Handling & Logging:**
+  - Log errors (set to DEBUG level for troubleshooting) for operations such as file fetching, GitHub API calls, and AI interactions.
+  - Ensure graceful handling of missing fields or authentication issues.
 
 ## How to Install the GitHub App
 
 Follow these steps to install the GitHub AI Bot on your repositories:
-
-  - Step 1: Go to the Installation URL
-
-    Navigate to the installation page for the GitHub App:
-  
-    [https://github.com/apps/GitHub_AI_Bot](https://github.com/apps/ai-powered-bot)
-
-  - Step 2: Install the App
-
-    On the installation page, click the **Install** (or **Configure**) button. You will be prompted to choose whether to install the app on:
-
-    - All repositories:  
-      The app will have access to every repository in your account or organization.
-  
-    - Selected repositories:  
-      You can select the specific repositories you want the app to have access to.
-
-  - Step 3: Grant Permissions
-
+  - **Step 1:** Go to the Installation URL
+    - Navigate to the installation page for the GitHub App:
+    [https://github.com/apps/GitHub_AI_Bot](https://github.com/apps/GitHub_AI_Bot)
+  - **Step 2:** Install the App
+    - On the installation page, click the **Install** (or **Configure**) button. You will be prompted to choose whether to install the app on:
+      - **All repositories:**
+        The app will have access to every repository in your account or organization.
+      - **Selected repositories:**
+        You can select the specific repositories you want the app to have access to.
+  - **Step 3:** Grant Permissions
     After selecting the repositories, you will see a list of permissions that the app requires (for example, read/write access to issues, pull requests, and repository contents). Review and grant the necessary permissions.
-
     Once you confirm, the app will be installed and will start receiving webhook events from the repositories it has access to.
 
 ## What Happens After Installation?
 
 After installation, the GitHub AI Bot will begin processing webhook events from your repositories. It will:
-
 - Analyze code in pull requests and issues.
 - Automatically generate pull request descriptions.
 - Execute admin commands (when issued by the repository owner) such as code updates, merges, and analysis.
@@ -135,21 +154,6 @@ GitHub AI Bot is already deployed on [Render](https://render.com/). Its publicly
 
 - **`/webhook`**: Main endpoint for receiving GitHub webhook events (push, pull request, issue comment).
 - **`/ping`**: Health-check endpoint.
-
-## Admin Commands
-
-Only the repository owner (admin) can issue commands. Example commands include:
-
-- **`@AIBot analyze repo`**: Analyze the repository for security misuses.
-- **`@AIBot update code`**: Update code in a pull request based on instructions.
-- **`@AIBot update`**: Retrieve and display the current code.
-- **`@AIBot merge code`**:  
-  - **For PR comments:** Merges a provided code snippet.  
-  - **For Issue comments:**  
-    - Extracts the Java file name from the issue body, retrieves the file content from the repository, and analyzes it using GPT-4.
-    - (See the README instructions in the code for more details.)
-- **`@AIBot analyze code`**:  
-  Extracts the file name from the issue body (or PR description), retrieves the file content, analyzes it using GPT-4, and posts the analysis result.
 
 ## Contributing
 
