@@ -17,7 +17,7 @@ from github import GithubIntegration, Github, Auth
 ###############################################################################
 # Logging: set to DEBUG for troubleshooting
 ###############################################################################
-logging.basicConfig(level=logging.DEBUG)
+logging.basicConfig(level=logging.ERROR)
 
 ###############################################################################
 # Load environment variables
@@ -64,6 +64,7 @@ def get_or_create_conversation(repo_full_name, issue_number, issue_body=None):
             "You are an assistant specialized in Java security analysis, "
             "best practices, and general code discussions. Keep context from "
             "previous messages in this issue to maintain a coherent conversation."
+            "Do not engage in discussions outside of security."
         )
         conversation_store[key] = [{"role": "system", "content": system_message}]
         if issue_body:
@@ -164,18 +165,23 @@ def handle_push(payload):
         default_branch = "main"
     if branch_name == default_branch:
         return jsonify({'status': 'ignored - push on default branch'}), 200
+
+    # Collect all changed Java files
     commits = payload.get('commits', [])
     java_files = set()
     for commit in commits:
         for f in commit.get('added', []) + commit.get('modified', []):
             if f.endswith('.java'):
                 java_files.add(f)
-    java_file_name = list(java_files)[0] if java_files else "No Java file changed."
+    
+    if not java_files:
+        java_files = {"No Java file changed."}
+
     commit_sha = payload.get('after')
-    short_desc = generate_pr_description_with_ai(
+    short_desc = generate_pr_description_for_multiple_files(
         branch_name=branch_name,
         pusher_name=pusher_name,
-        java_file_name=java_file_name,
+        java_file_names=list(java_files),
         repo_full_name=full_name,
         token_str=token_str,
         commit_ref=commit_sha
@@ -184,6 +190,7 @@ def handle_push(payload):
     if not pr:
         return jsonify({'status': 'failed to create PR'}), 500
     return jsonify({'status': 'success', 'pr_url': pr.html_url}), 200
+
 
 def generate_pr_description_with_ai(branch_name, pusher_name, java_file_name, repo_full_name, token_str, commit_ref=None):
     if not openai.api_key:
@@ -241,6 +248,65 @@ def generate_pr_description_with_ai(branch_name, pusher_name, java_file_name, re
             "**Impacted file**:\n"
             f"```java\n{java_file_name}\n```")
 
+def generate_pr_description_for_multiple_files(branch_name, pusher_name, java_file_names, repo_full_name, token_str, commit_ref=None):
+    if not openai.api_key:
+        return (f"Automated PR from '{branch_name}' by {pusher_name}.\n\n"
+                f"Impacted files (no AI summary):\n" + "\n".join(f"```java\n{f}\n```" for f in java_file_names))
+    
+    github = Github(token_str)
+    repo = github.get_repo(repo_full_name)
+    ref_to_fetch = commit_ref if commit_ref else branch_name
+    file_details = []
+    
+    for java_file in java_file_names:
+        try:
+            file_obj = repo.get_contents(java_file, ref=ref_to_fetch)
+            file_content = base64.b64decode(file_obj.content).decode("utf-8")
+        except Exception as e:
+            file_details.append(f"Could not fetch file `{java_file}`: {e}")
+            continue
+        MAX_CHARS = 1000
+        snippet = file_content[:MAX_CHARS]
+        if len(file_content) > MAX_CHARS:
+            snippet += "\n... [Truncated for prompt brevity] ..."
+        file_details.append(f"File: {java_file}\nSnippet:\n```java\n{snippet}\n```")
+    
+    combined_details = "\n\n".join(file_details)
+    system_prompt = (
+        "You are an assistant who writes short PR descriptions focused on Java security improvements. "
+        "Given the branch name, the pusher's name, and details for multiple Java files, provide a concise summary "
+        "that emphasizes any security-related changes or vulnerabilities addressed. "
+        "Mention each file name in triple backticks where appropriate."
+    )
+    user_prompt = (
+        f"Branch Name: {branch_name}\n"
+        f"Pusher: {pusher_name}\n"
+        f"Files Changed:\n{combined_details}\n\n"
+        "Please write a short PR description that summarizes these changes with an emphasis on security improvements."
+    )
+    try:
+        resp = openai.ChatCompletion.create(
+            model="gpt-4",
+            temperature=0,
+            max_tokens=300,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+        )
+        gpt_text = resp.choices[0].message.content.strip()
+    except Exception as e:
+        return (f"Automated PR from '{branch_name}' by {pusher_name}.\n\n"
+                f"Could not get AI-based summary. Error: {e}\n\n"
+                f"Files:\n" + "\n".join(f"```java\n{f}\n```" for f in java_file_names))
+    admin_username = repo.owner.login
+    return (f"@{admin_username}\n\n"
+            f"{gpt_text}\n\n"
+            f"**Branch**: `{branch_name}`\n"
+            f"**Pusher**: `{pusher_name}`\n"
+            f"**Impacted files**: " + ", ".join(f"`{f}`" for f in java_file_names))
+
+
 def create_pull_request_for_push(repo, source_branch, target_branch, pr_body):
     pr_title = f"Auto PR from branch '{source_branch}'"
     try:
@@ -273,135 +339,175 @@ def handle_pull_request(payload):
     token_str = access_token.token
     repo_full_name = repo_info.get('full_name', '')
     pr_number = pr_data.get('number', 0)
-    summary_comment = analyze_pr_no_issue(repo_full_name, pr_number, token_str)
-    post_pr_comment(Github(token_str), repo_full_name, pr_number, summary_comment)
+    github_instance = Github(token_str)
+    repo = github_instance.get_repo(repo_full_name)
+    pr = repo.get_pull(pr_number)
+    admin_username = repo.owner.login
+
+    # Loop over each changed Java file in the PR
+    for pr_file in pr.get_files():
+        if pr_file.filename.endswith('.java') and pr_file.status in ['added', 'modified']:
+            content = fetch_file_content(repo, pr_file.filename, pr.head.sha, token_str)
+            if content:
+                analysis_result = analyze_code_no_issue(content, token_str, repo_full_name)
+                comment = (
+                    f"@{admin_username} **Security Analysis for `{pr_file.filename}`**\n\n"
+                    f"{analysis_result}"
+                )
+                post_pr_comment(github_instance, repo_full_name, pr_number, comment)
     return jsonify({'status': 'success'}), 200
 
+
 def analyze_pr_no_issue(repo_full_name, pr_number, token_str):
+    """
+    Analyzes Java files from a pull request for potential vulnerabilities.
+    Uses structural splitting to divide code into logical sections before analysis.
+    Then, it calls GPT‑4 to merge the vulnerability findings from each section.
+    """
     github = Github(token_str)
     repo = github.get_repo(repo_full_name)
     pr = repo.get_pull(pr_number)
     admin_username = repo.owner.login
     java_files = []
+
+    # Retrieve the contents of changed .java files
     for pr_file in pr.get_files():
         if pr_file.filename.endswith('.java') and pr_file.status in ['added', 'modified']:
             content = fetch_file_content(repo, pr_file.filename, pr.head.sha, token_str)
             if content:
+                # Prepend a header with the file name to preserve context
                 snippet = f"--- {pr_file.filename} ---\n{content}"
                 java_files.append(snippet)
     if not java_files:
         return "No Java code found in this pull request."
+
+    # Combine all Java file snippets into one string.
     combined_code = "\n\n".join(java_files)
+    # Use structural splitting to divide the code into logical sections.
+    sections = structural_split_java_code(combined_code)
+
     system_prompt = (
-        "You are a Java security analyst. The user wants to detect any of these 16 misuses:\n"
-        "If you find any of the following issues, return them in a JSON array. Do not include any additional text or context:\n"
-        "1) Hardcoded cryptographic keys in SecretKeySpec\n"
-        "2) Hardcoded password in PBEKeySpec\n"
-        "3) Hardcoded KeyStore password\n"
-        "4) HostnameVerifier returning true\n"
-        "5) X509TrustManager with empty certificate validation\n"
-        "6) SSLSocket with omitted hostname verification\n"
-        "7) Using HTTP instead of HTTPS\n"
-        "8) Using java.util.Random instead of SecureRandom\n"
-        "9) Using constant seed in SecureRandom\n"
-        "10) Using constant salt in PBEParameterSpec\n"
-        "11) Using ECB mode instead of CBC/GCM\n"
-        "12) Using static/constant IV\n"
-        "13) Using iteration count < 1000 in PBEParameterSpec\n"
-        "14) Using broken symmetric ciphers (DES, Blowfish, RC4, etc.) instead of AES\n"
-        "15) Using RSA key size < 2048 bits\n"
-        "16) Using broken hash function (e.g. SHA1, MD5) instead of stronger ones (e.g. SHA-256)\n"
-        "Return a JSON array with keys: name, location, description, severity, correction. If none, return an empty array plus a summary."
+        "As a security expert in cryptography, follow the steps below to avoid any verbosity, and provide your analysis just in this enhanced JSON format: {File Name, JCA API or Class, Misuses across All Code Paths, Misuses in Executed Path, Secure Alternative if not secure, Executed from Main Method based on conditions?} add the location, description, severity (High with a CVSS score above 8.0 or those that allow remote code execution. Medium with a CVSS score between 5.0 and 8.0 or that requires local access for exploitation. Low with a CVSS score below 5.0.), and correction for each value in the JSON file:"
+        "1-JCA API Usages: Note all uses of Java Cryptography Architecture (JCA) APIs and classes, with attention to any conditions or variable assignments that affect the API choice."
+        "2- Provide a list of misuses for these APIs."
+        "3-Comprehensive Code Path Review: Identify potential misuses across all branches and paths, even if not executed in the specific scenario, to provide a full security review of the code structure."
+        "4-Execution Path Focus: Highlight issues observed specifically in the path executed given the initial values and conditions, ensuring that actual runtime security risks are prioritized."
+        "5-Runtime Accessibility: Confirm if the JCA API usage is accessible and executed from the main method based on the given initial conditions."
+        "Return a JSON array with keys: name, location, description, JCA API or Class, Misuses across All Code Paths, Misuses in Executed Path, severity (High with a CVSS score above 8.0 or those that allow remote code execution. Medium with a CVSS score between 5.0 and 8.0 or that requires local access for exploitation. Low with a CVSS score below 5.0.), Secure Alternative if not secure. If none, return an empty array plus a summary."
     )
-    user_prompt = (
-        f"Analyze the following Java code:\n\n{combined_code}\n\n"
-        "Return only a JSON array. If no issues are found, return an empty array plus a short explanation."
+
+    all_misuses = []
+    # Analyze each section separately.
+    for idx, section in enumerate(sections):
+        user_prompt = (
+            f"Analyze the following Java code section ({idx + 1} of {len(sections)}):\n\n{section}\n\n"
+            "Return only a JSON array."
+        )
+        try:
+            resp = openai.ChatCompletion.create(
+                model="gpt-4",
+                temperature=0,
+                max_tokens=1200,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ]
+            )
+            ai_text = resp.choices[0].message.content.strip()
+        except Exception as e:
+            logging.error(f"OpenAI call failed on section {idx + 1}: {e}")
+            continue
+        misuses = parse_ai_output(ai_text)
+        all_misuses.extend(misuses)
+
+    # Post-processing: merge the per-section results.
+    merged_misuses = merge_vulnerability_findings(all_misuses)
+    if not merged_misuses:
+        return f"@{admin_username} **Potential Security Misuses**\n\nNo vulnerabilities detected in analyzed code sections."
+
+    combined_json = json.dumps(merged_misuses, indent=2)
+    return (
+        f"@{admin_username} **Potential Security Misuses**\n\n"
+        f"**Aggregated AI Output**:\n```json\n{combined_json}\n```"
     )
-    if not openai.api_key:
-        return "No OpenAI API key configured; skipping AI analysis."
-    try:
-        resp = openai.ChatCompletion.create(
-            model="gpt-4",
-            temperature=0,
-            max_tokens=2200,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ]
-        )
-        ai_text = resp.choices[0].message.content.strip()
-    except Exception as e:
-        logging.error(f"OpenAI call failed: {e}")
-        return "Failed to analyze code with AI."
-    misuses = parse_ai_output(ai_text)
-    if not misuses:
-        return f"@{admin_username} **Potential Security Misuses**\n\n**AI Output**:\n```json\n{ai_text}\n```"
-    summary_lines = []
-    for misuse in misuses:
-        summary_lines.append(
-            f"- **{misuse.get('name')}**\n  Location: {misuse.get('location')}\n  Severity: {misuse.get('severity')}\n  Description: {misuse.get('description')}\n  Correction:\n```java\n{misuse.get('correction')}\n```"
-        )
-    return f"@{admin_username} **Potential Security Misuses**\n\n" + "\n\n".join(summary_lines) + f"\n\n**AI Output**:\n```json\n{ai_text}\n```"
 
 def analyze_code_no_issue(java_code, token_str, repo_full_name):
     """
-    Analyze a single snippet of Java code for potential security misuses.
+    Analyzes a single Java code snippet for vulnerabilities.
+    Uses structural splitting to divide the code into logical sections, then analyzes each,
+    and finally merges the results using GPT‑4.
     """
     github = Github(token_str)
     repo = github.get_repo(repo_full_name)
-    if not openai.api_key:
-        return "No OpenAI API key configured; skipping AI analysis."
-    system_prompt = (
-        "You are a Java security analyst. The user wants to detect any of these 16 misuses:\n"
-        "1) Hardcoded cryptographic keys in SecretKeySpec\n"
-        "2) Hardcoded password in PBEKeySpec\n"
-        "3) Hardcoded KeyStore password\n"
-        "4) HostnameVerifier returning true\n"
-        "5) X509TrustManager with empty certificate validation\n"
-        "6) SSLSocket with omitted hostname verification\n"
-        "7) Using HTTP instead of HTTPS\n"
-        "8) Using java.util.Random instead of SecureRandom\n"
-        "9) Using constant seed in SecureRandom\n"
-        "10) Using constant salt in PBEParameterSpec\n"
-        "11) Using ECB mode instead of CBC/GCM\n"
-        "12) Using static/constant IV\n"
-        "13) Using iteration count < 1000 in PBEParameterSpec\n"
-        "14) Using broken symmetric ciphers (DES, Blowfish, RC4, etc.) instead of AES\n"
-        "15) Using RSA key size < 2048 bits\n"
-        "16) Using broken hash function (SHA1, MD5) instead of stronger ones (e.g. SHA-256)\n"
-        "Return a JSON array with keys: name, location, description, severity, correction. If none, return an empty array plus a summary."
-    )
-    user_prompt = (
-        f"Analyze this Java code:\n\n{java_code}\n\n"
-        "Return only a JSON array of objects if you find any misuses. If none, return an empty array plus a short explanation."
-    )
-    try:
-        resp = openai.ChatCompletion.create(
-            model="gpt-4",
-            temperature=0,
-            max_tokens=2200,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ]
-        )
-        ai_text = resp.choices[0].message.content.strip()
-    except Exception as e:
-        logging.error(f"OpenAI call failed: {e}")
-        return "Failed to analyze code with AI."
     admin_username = repo.owner.login
-    misuses = parse_ai_output(ai_text)
-    if not misuses:
-        return f"@{admin_username} **Potential Security Misuses**\n\n```json\n{ai_text}\n```"
-    summary_lines = []
-    for misuse in misuses:
-        summary_lines.append(
-            f"- **{misuse.get('name')}**\n  Location: {misuse.get('location')}\n  Severity: {misuse.get('severity')}\n  Description: {misuse.get('description')}\n  Correction:\n```java\n{misuse.get('correction')}\n```"
-        )
-    return ("**Potential Security Misuses Found** (No Issues created)\n\n" +
-            "\n\n".join(summary_lines) +
-            f"\n\n**AI Output**:\n```json\n{ai_text}\n```")
 
+    # Split the code structurally into sections.
+    sections = structural_split_java_code(java_code)
+
+    system_prompt = (
+        "As a security expert in cryptography, follow the steps below to avoid any verbosity, and provide your analysis just in this enhanced JSON format: {File Name, JCA API or Class, Misuses across All Code Paths, Misuses in Executed Path, Secure Alternative if not secure, Executed from Main Method based on conditions?} add the location, description, severity (High with a CVSS score above 8.0 or those that allow remote code execution. Medium with a CVSS score between 5.0 and 8.0 or that requires local access for exploitation. Low with a CVSS score below 5.0.), and correction for each value in the JSON file:"
+        "1-JCA API Usages: Note all uses of Java Cryptography Architecture (JCA) APIs and classes, with attention to any conditions or variable assignments that affect the API choice."
+        "2- Provide a list of misuses for these APIs."
+        "3-Comprehensive Code Path Review: Identify potential misuses across all branches and paths, even if not executed in the specific scenario, to provide a full security review of the code structure."
+        "4-Execution Path Focus: Highlight issues observed specifically in the path executed given the initial values and conditions, ensuring that actual runtime security risks are prioritized."
+        "5-Runtime Accessibility: Confirm if the JCA API usage is accessible and executed from the main method based on the given initial conditions."
+        "Return a JSON array with keys: name, location, description, JCA API or Class, Misuses across All Code Paths, Misuses in Executed Path, severity (High with a CVSS score above 8.0 or those that allow remote code execution. Medium with a CVSS score between 5.0 and 8.0 or that requires local access for exploitation. Low with a CVSS score below 5.0.), Secure Alternative if not secure. If none, return an empty array plus a summary."
+    )
+
+    all_misuses = []
+    for idx, section in enumerate(sections):
+        user_prompt = (
+            f"Analyze the following Java code section ({idx + 1} of {len(sections)}):\n\n{section}\n\n"
+            "Return only a JSON array."
+        )
+        try:
+            resp = openai.ChatCompletion.create(
+                model="gpt-4",
+                temperature=0,
+                max_tokens=1200,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ]
+            )
+            ai_text = resp.choices[0].message.content.strip()
+        except Exception as e:
+            logging.error(f"OpenAI call failed on section {idx + 1}: {e}")
+            continue
+        misuses = parse_ai_output(ai_text)
+        all_misuses.extend(misuses)
+
+    # Post-processing: merge findings from all sections.
+    merged_misuses = merge_vulnerability_findings(all_misuses)
+    if not merged_misuses:
+        return f"@{admin_username} **Potential Security Misuses**\n\nNo vulnerabilities detected in the analyzed code."
+
+    combined_json = json.dumps(merged_misuses, indent=2)
+    return (
+        f"@{admin_username} **Potential Security Misuses**\n\n"
+        f"**Aggregated AI Output**:\n```json\n{combined_json}\n```"
+    )
+
+def fetch_file_content(repo, filename, ref, token_str):
+    """
+    Helper function to fetch and decode the content of a file from GitHub.
+    """
+    import base64
+    import requests
+    api_url = f"https://api.github.com/repos/{repo.full_name}/contents/{filename}?ref={ref}"
+    headers = {"Authorization": f"Bearer {token_str}"}
+    try:
+        r = requests.get(api_url, headers=headers)
+        r.raise_for_status()
+        data = r.json()
+        if data.get("encoding") == "base64":
+            return base64.b64decode(data["content"]).decode("utf-8")
+        else:
+            return None
+    except Exception as e:
+        logging.error(f"Failed to fetch file '{filename}': {e}")
+        return None
+    
 def analyze_repo_and_open_issues(github, repo_full_name, token_str):
     repo = github.get_repo(repo_full_name)
     default_branch = repo.default_branch
@@ -414,14 +520,19 @@ def analyze_repo_and_open_issues(github, repo_full_name, token_str):
             queue.extend(repo.get_contents(item.path, ref=default_branch))
         elif item.type == 'file' and item.path.endswith('.java'):
             java_files.append(item.path)
+    
+    # Retrieve all open issues once.
+    open_issues = list(repo.get_issues(state='open'))
+    
     created_count = 0
     for file_path in java_files:
+        # Check if an open issue already mentions this file.
+        if any(file_path in (issue.title or "") or file_path in (issue.body or "") for issue in open_issues):
+            continue  # Skip analysis for this file.
+        
         raw_code = fetch_file_content(repo, file_path, default_branch, token_str)
         if not raw_code:
             continue
-        print(f"=== DEBUG: read file '{file_path}' (length {len(raw_code)} chars) ===\n")
-        print(raw_code)
-        print("=== END OF FILE ===\n")
         analysis = analyze_code_no_issue(raw_code, token_str, repo_full_name)
         title = f"Security Analysis for {file_path}"
         body = f"**File:** `{file_path}`\n\n**Analysis:**\n\n{analysis}\n"
@@ -431,6 +542,7 @@ def analyze_repo_and_open_issues(github, repo_full_name, token_str):
         except Exception:
             pass
     return f"Analyzed {len(java_files)} .java files. Created {created_count} Issues."
+
 
 def fetch_file_content(repo, filename, ref, token_str):
     api_url = f"https://api.github.com/repos/{repo.full_name}/contents/{filename}?ref={ref}"
@@ -454,7 +566,7 @@ def parse_ai_output(ai_text):
         elif not isinstance(data, list):
             data = []
         valid = []
-        required_keys = ["name", "location", "description", "severity", "correction"]
+        required_keys = ["name", "location", "description", "JCA API or Class", "Misuses across All Code Paths", "Misuses in Executed Path", "severity" , "Secure Alternative if not secure"]
         for item in data:
             if all(k in item for k in required_keys):
                 valid.append(item)
@@ -462,6 +574,81 @@ def parse_ai_output(ai_text):
     except Exception:
         return []
 
+def structural_split_java_code(java_code):
+    """
+    Splits the Java code into logical sections based on class, interface, or enum definitions.
+    If no such structure is found, attempts to split based on method definitions.
+    Returns a list of code sections.
+    """
+    # First, try to split by class/interface/enum declarations.
+    pattern = r"(?=^\s*(public\s+)?(class|interface|enum)\s+\w+)"
+    sections = re.split(pattern, java_code, flags=re.MULTILINE)
+    if len(sections) > 1:
+        result = []
+        # If there's an initial preamble (e.g. package/import statements), add it as its own section.
+        if sections[0].strip():
+            result.append(sections[0])
+        # Combine each marker (captured group) with its following code.
+        for i in range(1, len(sections), 2):
+            if i + 1 < len(sections):
+                result.append((sections[i] or '') + (sections[i + 1] or ''))
+            else:
+                result.append(sections[i] or '')
+        if result:
+            return result
+
+    # Fallback: try splitting by method definitions (public, protected, private, static)
+    pattern_method = r"(?=^\s*(public|protected|private|static)\s+[\w\<\>\[\]]+\s+\w+\s*\(.*?\)\s*\{)"
+    sections = re.split(pattern_method, java_code, flags=re.MULTILINE | re.DOTALL)
+    if len(sections) > 1:
+        result = []
+        if sections[0].strip():
+            result.append(sections[0])
+        for i in range(1, len(sections), 2):
+            if i + 1 < len(sections):
+                result.append((sections[i] or '') + (sections[i + 1] or ''))
+            else:
+                result.append(sections[i] or '')
+        return result
+
+    # If no splitting is possible, return the entire code as one section.
+    return [java_code]
+
+
+def merge_vulnerability_findings(misuses):
+    """
+    Merges vulnerability analysis results from multiple sections.
+    Calls GPT‑4 to deduplicate and summarize findings that may span multiple sections.
+    Returns a merged JSON array of vulnerability objects.
+    """
+    merged_prompt = (
+        "You are a security analysis assistant. The following JSON array contains vulnerability analysis results "
+        "from multiple sections of Java code. Some vulnerabilities might be duplicated or refer to the same issue. "
+        "Please merge these results, removing duplicates and summarizing any issues that span multiple sections. "
+        "Return only a JSON array of objects with the keys: name, location, description, severity, correction."
+    )
+    input_json = json.dumps(misuses, indent=2)
+    user_prompt = f"Merge the following vulnerability findings:\n\n{input_json}\n\nReturn only a JSON array."
+    try:
+        resp = openai.ChatCompletion.create(
+            model="gpt-4",
+            temperature=0,
+            max_tokens=2200,
+            messages=[
+                {"role": "system", "content": merged_prompt},
+                {"role": "user", "content": user_prompt},
+            ]
+        )
+        merged_text = resp.choices[0].message.content.strip()
+        merged_misuses = parse_ai_output(merged_text)
+        if merged_misuses:
+            return merged_misuses
+        else:
+            return misuses
+    except Exception as e:
+        logging.error(f"OpenAI merge call failed: {e}")
+        return misuses
+    
 def post_pr_comment(github, repo_full_name, pr_number, comment_body):
     try:
         repo = github.get_repo(repo_full_name)
@@ -639,7 +826,7 @@ def handle_issue_comment(payload):
         else:
             post_issue_comment(github, repo_full_name, issue_number, merged_msg)
         return jsonify({'status': 'success'}), 200
-    if "@AIBot analyze code" in comment_body:
+    if "@AIBot analyze file" in comment_body:
         # New admin order for "@AIBot analyze code":
         # 1. Get the file name from the issue body or from the PR description.
         file_name = extract_file_name(issue_body)
@@ -690,11 +877,11 @@ def chat_with_history(messages):
     ephemeral_instruction = {
         "role": "system",
         "content": (
-            "Additionally, if you propose any code changes or corrected lines, "
+            "Remember: this conversation is strictly about security analysis and vulnerability remediation."
+            "If a topic falls outside of Java security, respond by stating that only security-related discussion is supported."
+            "Additionally, if you propose any code changes or corrected lines,"
             "always provide them in triple-backtick format. For example:\n\n"
-            "1) File Reference Block:\n```java\nMyClass.java\n```\n"
-            "2) Code Snippet Block:\n```java\npublic class MyClass { ... }\n```\n\n"
-            "Then type `@AIBot merge code`."
+            "```java\nCode Snippet Block\n```\n\n"
         )
     }
     ephemeral_messages = [ephemeral_instruction] + messages
