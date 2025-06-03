@@ -30,10 +30,11 @@ This repository contains a GitHub App written in Python using Flask. The bot lis
   - **In-Memory Conversation Context:**
      - Maintains conversation history per repository and issue number to ensure coherent discussions.
   - **Admin Commands (Restricted to Repository Owner):**
-    - `@AIBot analyze repo`: Automatically scans the entire repository for Java files, analyzes each for security vulnerabilities, and opens issues with the findings.
-    - `@AIBot analyze file`: Analyzes a specific file (extracted from the issue or PR body) for security vulnerabilities.
-    - `@AIBot update code` / `@AIBot update`: Uses AI to generate updated code based on user instructions.
-    - `@AIBot merge code`: Merges AI-proposed corrections into the repository.
+    - `@AI_Bot analyze repo`: Automatically scans the entire repository for Java files, analyzes each for security vulnerabilities, and opens issues with the findings.
+    - `@AI_Bot analyze file`: Analyzes a specific file (extracted from the issue or PR body) for security vulnerabilities.
+    - `@AI_Bot update code` / `@AIBot update`: Uses AI to generate updated code based on user instructions.
+    - `@AI_Bot merge code`: Merges AI-proposed corrections into the repository.
+    - `@AI_Bot trace <method_name>`: search for the method in the repository and analyze it.
   - **Strict Security-Only Discussion:**
      - The bot’s system instructions enforce that all conversations remain focused on security analysis and vulnerability remediation.
      - If topics fall outside Java security, the bot responds by indicating that only security-related discussion is supported.
