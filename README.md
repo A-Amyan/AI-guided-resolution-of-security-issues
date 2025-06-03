@@ -1,6 +1,6 @@
 # GitHub AI Code Analysis Bot
 
-This repository contains a GitHub App written in Python using Flask. The bot listens to GitHub webhook events (push, pull request, and issue comments) and uses OpenAI's GPT-4 to analyze Java code for potential security misuses. It also supports admin commands to update or merge code based on AI analysis.
+This repository contains a GitHub App written in Python using Flask. The bot listens to GitHub webhook events (push, pull request, and issue comments) and uses OpenAI's o3-mini to analyze Java code for potential security misuses. It also supports admin commands to update or merge code based on AI analysis.
 
 ## Features
 
@@ -80,7 +80,7 @@ After installation, the GitHub AI Bot will begin processing webhook events from 
 
 - **Python 3.8+**
 - A GitHub App with appropriate permissions (e.g., repository contents, issues, pull requests)
-- An [OpenAI API key](https://openai.com) with access to GPT-4
+- An [OpenAI API key](https://openai.com) with access to o3-mini
 
 ## Installation
 
