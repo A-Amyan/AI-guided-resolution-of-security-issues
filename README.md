@@ -33,13 +33,14 @@ This repository contains a GitHub App written in Python using Flask. The bot lis
     - `@AI_Bot analyze repo`: Automatically scans the entire repository for Java files, analyzes each for security vulnerabilities, and opens issues with the findings.
     - `@AI_Bot analyze file`: Analyzes a specific file (extracted from the issue or PR body) for security vulnerabilities.
     - `@AI_Bot update code` / `@AIBot update`: Uses AI to generate updated code based on user instructions.
+    - `@AIBot update`: Bring the relevant code and print it.
     - `@AI_Bot merge code`: Merges AI-proposed corrections into the repository.
     - `@AI_Bot trace <method_name>`: search for the method in the repository and analyze it.
   - **Strict Security-Only Discussion:**
      - The bot’s system instructions enforce that all conversations remain focused on security analysis and vulnerability remediation.
      - If topics fall outside Java security, the bot responds by indicating that only security-related discussion is supported.
 - **AI-Powered Analysis & Summarization:**
-  - **GPT‑4 Integration:**
+  - **o3-mini Integration:**
     - Generate concise PR descriptions based on Java file snippets.
     - Perform in-depth security analysis on code sections, identifying vulnerabilities, and misuses, and suggesting secure alternatives.
     - Merge findings from different sections to avoid duplication
@@ -47,7 +48,7 @@ This repository contains a GitHub App written in Python using Flask. The bot lis
     - System and user prompts are tailored to focus on security best practices, cryptography, and vulnerability remediation.
 - **Code Merging & Updates:**
   - Support updating code based on admin correction instructions.
-  - Fetche the original code from GitHub, apply minimal changes via GPT‑4 and update the repository file with a new commit.
+  - Fetch the original code from GitHub, apply minimal changes via o3-mini, and update the repository file with a new commit.
 - **Robust Error Handling & Logging:**
   - Log errors (set to DEBUG level for troubleshooting) for operations such as file fetching, GitHub API calls, and AI interactions.
   - Ensure graceful handling of missing fields or authentication issues.
