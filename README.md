@@ -8,7 +8,7 @@ This repository contains a GitHub App written in Python using Flask. The bot lis
   - Uses environment variables (`APP_ID`, `PRIVATE_KEY`, `OPENAI_API_KEY`, `BOT_ADMIN`, `BOT_FALLBACK_PAT`) for secure configuration.
   - Authenticates as a GitHub App using PyGithub and a custom `Auth.AppAuth`.
 - **Flask-Based Webhook Server:**
-  - Listen for GitHub webhook events on `/webhook` and a health check endpoint `/ping`.
+  - Listen for GitHub webhook events on `https://ai-guided-resolution-of-security-issues.onrender.com/webhook` and a health check endpoint `/ping`.
   - Support the following GitHub events:
     - **Push Events:** Automatically triggers actions on branch pushes.
     - **Pull Request Events:** Analyzes code changes in PRs.
