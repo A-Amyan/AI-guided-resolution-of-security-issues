@@ -17,7 +17,7 @@ from github import GithubIntegration, Github, Auth
 ###############################################################################
 # Logging: set to DEBUG for troubleshooting
 ###############################################################################
-logging.basicConfig(level=logging.DEBUG) # ERROR, DEBUG
+logging.basicConfig(level=logging.ERROR) # ERROR, DEBUG
 
 ###############################################################################
 # Load environment variables
