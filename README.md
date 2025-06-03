@@ -17,7 +17,7 @@ This repository contains a GitHub App written in Python using Flask. The bot lis
   - **Automatic Pull Request Creation:** When a push occurs on a non-default branch, the bot automatically creates a pull request.
   - **Multi-File AI-Generated PR Description:**
     - Collect all changed Java files from the push.
-    - Generate a short, security-focused PR description that summarizes all impacted Java files using OpenAI GPT‑4.
+    - Generate a short, security-focused PR description that summarizes all impacted Java files using OpenAI o3-mini.
 - **Pull Request Event Handling:**
   - **Per-File Security Analysis:**
     - Iterate through each changed Java file in the pull request.
@@ -28,7 +28,7 @@ This repository contains a GitHub App written in Python using Flask. The bot lis
      - Post individual comments on the pull request with the security analysis for each impacted Java file.
 - **Issue Comment Command Handling:**
   - **In-Memory Conversation Context:**
-     - Maintains conversation history per repository and issue number to ensure coherent discussions.
+     - Maintains conversation history per repository and issue number to ensure coherent discussions (user's message should start with `@AI_Bot`).
   - **Admin Commands (Restricted to Repository Owner):**
     - `@AI_Bot analyze repo`: Automatically scans the entire repository for Java files, analyzes each for security vulnerabilities, and opens issues with the findings.
     - `@AI_Bot analyze file`: Analyzes a specific file (extracted from the issue or PR body) for security vulnerabilities.
