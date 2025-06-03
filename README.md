@@ -5,7 +5,7 @@ This repository contains a GitHub App written in Python using Flask. The bot lis
 ## Features
 
 - **GitHub App Integration & Authentication:**
-  - Uses environment variables (`GITHUB_APP_ID`, `GITHUB_PRIVATE_KEY`, `OPENAI_API_KEY`) for secure configuration.
+  - Uses environment variables (`APP_ID`, `PRIVATE_KEY`, `OPENAI_API_KEY`, `BOT_ADMIN`, `BOT_FALLBACK_PAT`) for secure configuration.
   - Authenticates as a GitHub App using PyGithub and a custom `Auth.AppAuth`.
 - **Flask-Based Webhook Server:**
   - Listen for GitHub webhook events on `/webhook` and a health check endpoint `/ping`.
