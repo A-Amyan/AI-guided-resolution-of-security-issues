@@ -33,7 +33,7 @@ This repository contains a GitHub App written in Python using Flask. The bot lis
     - `@AI_Bot analyze repo`: Automatically scans the entire repository for Java files, analyzes each for security vulnerabilities, and opens issues with the findings.
     - `@AI_Bot analyze file`: Analyzes a specific file (extracted from the issue or PR body) for security vulnerabilities.
     - `@AI_Bot update code`: Uses AI to generate updated code based on user instructions.
-    - `@AI_Bot update`: Bring the relevant code and print it.
+    - `@AI_Bot update`: Fetches and re‐posts the most relevant code snippet for the current issue or pull request.
     - `@AI_Bot merge code`: Merges AI-proposed corrections into the repository.
     - `@AI_Bot trace <method_name>`: search for the method in the repository and analyze it.
   - **Strict Security-Only Discussion:**
