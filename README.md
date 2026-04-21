@@ -67,6 +67,7 @@ The project is structured in a service-oriented manner to ensure clear separatio
     ├── services/             # Integrations (GitHub API, OpenAI API, and core JCA Analyzer)
     ├── prompts/              # System and user prompt definitions for the LLM
     └── utils/                # Helper functions and memory state
+ ```
 
 ## How to Install the GitHub App
 
