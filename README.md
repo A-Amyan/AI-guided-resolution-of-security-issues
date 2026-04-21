@@ -5,7 +5,7 @@ This repository contains a GitHub App written in Python using Flask. The bot lis
 ## Features
 
 - **GitHub App Integration & Authentication:**
-  - Uses environment variables (`APP_ID`, `PRIVATE_KEY`, `OPENAI_API_KEY`, `BOT_ADMIN`, `BOT_FALLBACK_PAT`) for secure configuration.
+  - Uses environment variables (`GITHUB_APP_ID`, `GITHUB_PRIVATE_KEY`, `OPENAI_API_KEY`, `BOT_ADMIN`, `BOT_FALLBACK_PAT`) for secure configuration.
   - Authenticates as a GitHub App using PyGithub and a custom `Auth.AppAuth`.
 - **Flask-Based Webhook Server:**
   - Listen for GitHub webhook events on `https://ai-guided-resolution-of-security-issues.onrender.com/webhook` and a health check endpoint `/ping`.
@@ -53,6 +53,21 @@ This repository contains a GitHub App written in Python using Flask. The bot lis
   - Log errors (set to DEBUG level for troubleshooting) for operations such as file fetching, GitHub API calls, and AI interactions.
   - Ensure graceful handling of missing fields or authentication issues.
 
+## Project Structure
+
+The project is structured in a service-oriented manner to ensure clear separation of concerns:
+
+```text
+├── app.py                    # Application entry point (Flask setup)
+├── config.py                 # Configuration and environment variables
+├── requirements.txt
+└── src/
+    ├── routes/               # Webhook routing endpoints
+    ├── handlers/             # Core logic for processing specific GitHub events (push, PR, issue)
+    ├── services/             # Integrations (GitHub API, OpenAI API, and core JCA Analyzer)
+    ├── prompts/              # System and user prompt definitions for the LLM
+    └── utils/                # Helper functions and memory state
+
 ## How to Install the GitHub App
 
 Follow these steps to install the GitHub AI Bot on your repositories:
@@ -88,17 +103,19 @@ After installation, the GitHub AI Bot will begin processing webhook events from 
 
    ```bash
    git clone https://github.com/A-Amyan/AI-guided-resolution-of-security-issues.git
-   cd your-repo-name
+   cd AI-guided-resolution-of-security-issues
    ```
 
 2. **Create and Activate a Virtual Environment (optional but recommended):**
 
   - On Linux/MacOS, run:
     ```bash
+    python3 -m venv venv
     source venv/bin/activate
     ```
   - On Windows, run:
     ```bash
+    python -m venv venv
     venv\Scripts\activate
     ```
 
@@ -126,38 +143,27 @@ After installation, the GitHub AI Bot will begin processing webhook events from 
    Create a `.env` file in the root directory with the following content:
 
    ```dotenv
-   APP_ID           = os.getenv('GITHUB_APP_ID')
-   PRIVATE_KEY      = os.getenv('GITHUB_PRIVATE_KEY')
-   OPENAI_API_KEY   = os.getenv("OPENAI_API_KEY")
-   BOT_ADMIN        = os.getenv("BOT_ADMIN")
-   BOT_FALLBACK_PAT = os.getenv("BOT_FALLBACK_PAT")
+   GITHUB_APP_ID=        123456
+  GITHUB_PRIVATE_KEY=    "-----BEGIN RSA PRIVATE KEY-----\n..."
+  OPENAI_API_KEY=        sk-your-openai-api-key
+  BOT_ADMIN=             your-github-username
+  BOT_FALLBACK_PAT=      ghp_your-personal-access-token
+  PORT=                  5000
    ```
-
-   Replace the placeholders with your actual values.
 
 ## Running the Bot Locally
 
-Start the Flask application by running:
-```python
-if __name__ == '__main__':
-    app.run(debug=True, port=5000)
-```
 
 ```bash
 python app.py
 
 ```
 
-The server will listen on port 5000.
-
-## Deployment
-
-GitHub AI Bot is already deployed on [Render](https://render.com/). Its publicly accessible URL (for webhook events) is provided during installation. 
+The server will listen on the port specified in your .env file (defaults to 5000).
 
 ## Webhook Endpoints
 
 - **`/webhook`**: Main endpoint for receiving GitHub webhook events (push, pull request, issue comment).
-- **`/ping`**: Health-check endpoint.
 
 ## Contributing
 
