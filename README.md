@@ -143,8 +143,8 @@ After installation, the GitHub AI Bot will begin processing webhook events from 
 
    Create a `.env` file in the root directory with the following content:
 
-   ```dotenv
-  GITHUB_APP_ID=        123456
+  ```dotenv
+  GITHUB_APP_ID=         123456
   GITHUB_PRIVATE_KEY=    "-----BEGIN RSA PRIVATE KEY-----\n..."
   OPENAI_API_KEY=        sk-your-openai-api-key
   BOT_ADMIN=             your-github-username
@@ -153,8 +153,6 @@ After installation, the GitHub AI Bot will begin processing webhook events from 
   ```
 
 ## Running the Bot Locally
-
-
 ```bash
 python app.py
 
