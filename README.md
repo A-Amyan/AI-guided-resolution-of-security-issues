@@ -153,8 +153,9 @@ After installation, the GitHub AI Bot will begin processing webhook events from 
     ```
 
 ## Running the Bot Locally
+    
     ```bash
-    python app.py
+    pip install -r requirements.txt
     ```
 
 The server will listen on the port specified in your .env file (defaults to 5000).
